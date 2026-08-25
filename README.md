@@ -1,133 +1,112 @@
 # agent-log-vault
 
-`agent-log-vault` is a CLI for storing old Codex archived chats outside
-Codex-managed storage and restoring them later without changing their bytes.
-
-Storage locations can be an absolute local directory or an existing encrypted
-rclone remote:
+`agent-log-vault` (`alv`) safely moves Codex archived chats between
+`archived_sessions` and an encrypted cold vault.
 
 ```text
-file:/absolute/path
-rclone:<crypt-remote>:<optional/root>
+Codex archived_sessions <-> encrypted cold vault
 ```
 
-## Commands
+Cold storage always uses rclone `crypt`, whether its backing storage is a
+folder, mounted drive, Cloudflare R2, Backblaze B2, or Google Drive.
 
-```text
-agent-log-vault list codex [filters] [--codex-home <directory>]
-agent-log-vault list <location>
-agent-log-vault inspect <chat-or-path> [--codex-home <directory>]
-agent-log-vault put <chat-or-path> --to <location> [--codex-home <directory>]
-agent-log-vault verify <chat> --at <location>
-agent-log-vault restore <chat> --from <location> [--codex-home <directory>]
-agent-log-vault evict <chat-or-path> --verified-at <location> [--codex-home <directory>] --yes
-```
+## Setup
 
-A chat can be its `rollout-*.jsonl` filename or, for `put` and `evict`, its
-full path inside an `archived_sessions` directory. `CODEX_HOME` is honored;
-otherwise the default is `$HOME/.codex`.
+The CLI requires `rclone` and either `shasum` or `sha256sum`. Creating a vault
+also requires `openssl`. `jq` enables filtered listings, inspection, and
+recovery export.
 
-Filtered Codex listings read only the first `session_meta` record from each
-rollout. They require `jq` and support:
-
-```text
---long
---created-before YYYY-MM-DD
---created-after YYYY-MM-DD
---project <exact-cwd-or-directory-name>
---larger-than <bytes-or-K/M/G/T>
-```
-
-`--long` shows creation time, byte size, `cwd`, and the exact rollout filename.
-Filters can be combined. `inspect` shows identifying metadata for one chat and,
-when available, its title and archive time from the read-only Codex state
-database. Discovery commands never copy, restore, or remove files.
-
-## Example
+Create a local encrypted vault in an existing directory:
 
 ```sh
-mkdir -m 700 /Volumes/MyVault/agent-log-vault
-
-./agent-log-vault list codex
-
-./agent-log-vault list codex \
-  --created-before 2026-06-01 \
-  --project my-project \
-  --larger-than 100M \
-  --long
-
-./agent-log-vault inspect rollout-EXAMPLE.jsonl
-
-./agent-log-vault put rollout-EXAMPLE.jsonl \
-  --to file:/Volumes/MyVault/agent-log-vault
-
-./agent-log-vault verify rollout-EXAMPLE.jsonl \
-  --at file:/Volumes/MyVault/agent-log-vault
-
-./agent-log-vault evict rollout-EXAMPLE.jsonl \
-  --verified-at file:/Volumes/MyVault/agent-log-vault \
-  --yes
-
-./agent-log-vault restore rollout-EXAMPLE.jsonl \
-  --from file:/Volumes/MyVault/agent-log-vault
+mkdir -p /absolute/path/to/cold-vault
+./alv vault add local cold --path /absolute/path/to/cold-vault
 ```
 
-The same commands work with a configured rclone crypt remote:
+Or configure a cloud vault. R2 expects bucket-scoped Object Read & Write
+credentials; B2 expects a Read and Write application key for an existing
+bucket. Drive hands browser authorization to rclone.
 
 ```sh
-./agent-log-vault put rollout-EXAMPLE.jsonl \
-  --to 'rclone:my-vault-crypt:agent-log-vault'
-
-./agent-log-vault verify rollout-EXAMPLE.jsonl \
-  --at 'rclone:my-vault-crypt:agent-log-vault'
-
-./agent-log-vault restore rollout-EXAMPLE.jsonl \
-  --from 'rclone:my-vault-crypt:agent-log-vault'
+./alv vault add r2 cold
+./alv vault add b2 cold
+./alv vault add drive cold
 ```
 
-`put` copies and verifies but does not remove the Codex source. `evict` is the
-only destructive command: it verifies that the stored bytes match the Codex
-copy immediately before removing that copy. `restore` leaves the stored copy
-intact.
+Advanced users can wrap any existing rclone target. If the target is already a
+secure `crypt` remote, it is used directly.
 
-Stored chats live under `<vault>/archived_sessions` with SHA-256 sidecars.
-Completed files are never overwritten, symbolic links are rejected, and copy
-operations use temporary files before finalizing.
+```sh
+./alv vault add rclone cold --remote existing-remote:optional/path
+```
 
-Stop Codex before putting, evicting, or restoring a chat so its files remain
-stable during the operation.
+Setup creates the encryption configuration in rclone, performs a disposable
+upload/read-back check, and saves the named vault only if validation succeeds.
+The first vault is the default. Use `./alv vault list`,
+`./alv vault use <name>`, or `--vault <name>` when more than one is configured.
 
-Codex chats may contain source code, credentials, tool output, images, and
-local paths. The filesystem adapter stores raw files and does not encrypt them;
-use a destination whose access and encryption you trust.
+## Everyday use
 
-## Storage adapters
+```sh
+./alv list local
+./alv list cold
+./alv offload rollout-EXAMPLE.jsonl
+./alv restore rollout-EXAMPLE.jsonl
+./alv verify rollout-EXAMPLE.jsonl
+```
 
-The CLI core calls the storage dispatcher in `lib/agent-log-vault/storage.sh`.
-The filesystem implementation is in
-`lib/agent-log-vault/adapters/file.sh`. The encrypted rclone implementation is
-in `lib/agent-log-vault/adapters/rclone.sh`. Keep the executable and `lib`
-directory together when running the CLI.
+The state transitions are:
 
-The rclone adapter requires an existing remote whose rclone type is `crypt`,
-with standard filename encryption and directory-name encryption enabled. The
-CLI does not create the remote or read, store, or print its credentials and
-encryption passwords. Back up the rclone configuration and crypt passwords:
-without them, encrypted filenames and contents cannot be recovered.
+```text
+local only --offload--> cold only
+cold only  --restore--> both
+both       --offload--> cold only
+```
 
-Remote verification downloads and decrypts the complete chat and checksum,
-then computes SHA-256 locally. This works without provider-specific checksum
-support, but it consumes download time and any egress charged by the provider.
-An interrupted upload without its checksum is omitted from `list`; retrying
-`put` completes it only when its bytes exactly match the selected Codex chat.
+Restore retains the cold copy. Offloading a restored chat verifies the existing
+cold bytes and removes the local copy without uploading it again.
 
-Run the filesystem and encrypted-rclone synthetic test suites with:
+`list local` accepts `--long`, `--created-before YYYY-MM-DD`, `--created-after
+YYYY-MM-DD`, `--project <cwd-or-name>`, and `--larger-than <bytes-or-K/M/G/T>`.
+`inspect <thread>` shows identifying metadata. `CODEX_HOME` and
+`--codex-home <directory>` are supported for disposable environments and
+non-default Codex homes.
+
+## Safety and recovery
+
+- Only `rollout-*.jsonl` files directly inside `archived_sessions` can be
+  offloaded.
+- Offload uploads, reads back, SHA-256 verifies, rechecks the source, and only
+  then removes the local file.
+- Restore downloads to private temporary storage, verifies, and atomically
+  places the exact bytes in `archived_sessions`.
+- Different existing files are never overwritten, and failed operations retain
+  their source.
+- Restore never removes the cold copy.
+
+Quit Codex Desktop and any Codex CLI process before offloading or restoring so
+the archive is stable during the operation.
+
+Rclone owns provider credentials, OAuth tokens, and encryption secrets. Back up
+the recovery export securely; it is sensitive and is required to decrypt the
+vault on another machine.
+
+```sh
+./alv vault recovery cold --output /secure/location/cold-recovery.conf
+```
+
+Use that file as `RCLONE_CONFIG` on the recovery machine, verify the printed
+rclone target, then pass the printed encrypted target to
+`alv vault add rclone` to recreate the named profile.
+
+## Validation
 
 ```sh
 ./tests/test.sh
 ./tests/test-rclone.sh
+./tests/test-providers.sh
 ```
 
-The rclone test uses only a disposable local crypt remote and a temporary
-rclone configuration. It does not access the normal rclone config, a cloud
-provider, or the real Codex home.
+The tests use disposable Codex homes, local storage, rclone configurations, and
+provider mocks. They do not access the normal rclone configuration, cloud
+accounts, or the real `~/.codex`.

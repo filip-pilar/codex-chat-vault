@@ -1,60 +1,68 @@
 # agent-log-vault blueprint
 
-`agent-log-vault` is a CLI for moving old Codex chats out of
-`archived_sessions` and restoring them when needed.
-
-## Model
+`agent-log-vault` is a safe shuttle between Codex archived chats and an
+encrypted cold vault.
 
 ```text
-Codex archived chats <-> transfer engine <-> storage destination
-                                             |- filesystem adapter
-                                             `- cloud adapter
+Codex archived_sessions <-> encrypted cold vault
 ```
 
-A stored chat consists of its original `rollout-*.jsonl` file and a SHA-256
-checksum. The JSONL is treated as opaque data: its bytes are never parsed,
-normalized, or rewritten.
+The everyday workflow is:
 
-Discovery reads only the first `session_meta` record. Chats can be narrowed by
-creation date, recorded working directory, or size, then selected by their
-exact rollout filename. Inspecting and filtering never perform a transfer or
-removal.
+```text
+alv list local
+alv list cold
+alv offload <thread>
+alv restore <thread>
+alv verify <thread>
+```
 
-The transfer engine supports a Codex endpoint and storage locations:
+## State model
 
-- The Codex endpoint finds and restores chats in `archived_sessions`.
-- `file:` stores chats in a local directory or mounted volume.
-- `rclone:` stores chats through an existing encrypted rclone remote.
-- Cloud adapters make providers such as Cloudflare R2, Backblaze B2, and Google
-  Drive easy to configure and use.
+```text
+local only --offload--> cold only
+cold only  --restore--> both
+both       --offload--> cold only
+```
 
-Storage backends provide the same basic operations: put, get, list, and verify.
-The filesystem and encrypted rclone backends are built into the CLI. Provider
-helpers may configure rclone while keeping credentials and provider details out
-of the core.
+`restore` retains the cold copy. If a matching cold copy already exists,
+`offload` verifies it and removes only the local copy without uploading again.
 
-## Transfers
+## Safety
 
-Putting a chat into the vault copies it and verifies the destination. It does
-not remove the Codex copy.
+- Only files directly inside Codex's `archived_sessions` are accepted.
+- The original `rollout-*.jsonl` bytes are never rewritten.
+- Cold storage is always encrypted, including folders and mounted drives.
+- Offload is copy, encrypted read-back, SHA-256 verification, then local
+  removal.
+- Restore is encrypted download to a private temporary file, SHA-256
+  verification, then atomic placement in `archived_sessions`.
+- A different existing file is never overwritten.
+- Failed or interrupted operations leave their source intact.
+- A verified cold copy is never removed by restore or offload.
 
-Removing a chat from Codex is a separate, explicit action allowed only after a
-vaulted copy has been verified. Internally, offloading is always
-copy -> verify -> remove, never a direct move.
+Each completed cold thread consists of the encrypted JSONL and its encrypted
+SHA-256 sidecar. The sidecar is written last and marks the transfer complete.
 
-Restoring retrieves and verifies the original bytes before placing the JSONL
-in Codex's `archived_sessions` directory. Restoration leaves the vaulted copy
-intact.
+## Vaults
 
-Existing completed files are never overwritten. Transfers use temporary
-destinations and finalize only after verification succeeds.
+A named vault profile points to an rclone `crypt` remote. Rclone is the single
+storage and transfer engine for local folders, Cloudflare R2, Backblaze B2,
+Google Drive, and advanced user-configured targets.
 
-## Encryption
+```text
+alv vault add local <name> --path <path>
+alv vault add r2 <name>
+alv vault add b2 <name>
+alv vault add drive <name>
+alv vault add rclone <name> --remote <existing-target>
+```
 
-Encryption belongs to the storage destination rather than the Codex format.
-Local destinations store the raw JSONL and checksum. Cloud destinations encrypt
-filenames and contents locally while uploading and decrypt them while
-downloading.
+Provider helpers let rclone own credentials and OAuth tokens, create the crypt
+layer with content and filename encryption, perform a disposable upload and
+read-back check, and save the profile only after validation succeeds. The first
+vault becomes the default; `alv vault use <name>` changes it.
 
-The CLI works only with the original Codex bytes. Cloud tooling owns provider
-credentials and encryption configuration; `agent-log-vault` stores neither.
+Profiles contain only the vault name, provider, and crypt remote. Recovery
+export writes the selected rclone configuration and reconstruction instructions
+to a user-chosen private file.
