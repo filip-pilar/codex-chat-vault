@@ -413,12 +413,13 @@ alv_command_list() {
     cold)
       [ -z "$ALV_LIST_CODEX_HOME" ] || \
         alv_fail "--codex-home is only valid when listing local"
-      [ "$ALV_LIST_LONG" = false ] && \
-        [ -z "$ALV_LIST_CREATED_BEFORE" ] && \
-        [ -z "$ALV_LIST_CREATED_AFTER" ] && \
-        [ -z "$ALV_LIST_PROJECT" ] && \
-        [ -z "$ALV_LIST_LARGER_THAN" ] || \
+      if [ "$ALV_LIST_LONG" != false ] || \
+         [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
+         [ -n "$ALV_LIST_CREATED_AFTER" ] || \
+         [ -n "$ALV_LIST_PROJECT" ] || \
+         [ -n "$ALV_LIST_LARGER_THAN" ]; then
         alv_fail "metadata filters are only valid when listing local"
+      fi
       alv_profile_load_selected "$ALV_LIST_VAULT"
       alv_storage_open "$ALV_PROFILE_LOCATION"
       alv_storage_list
