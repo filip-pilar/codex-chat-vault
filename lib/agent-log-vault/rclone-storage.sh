@@ -1,4 +1,4 @@
-# Encrypted rclone storage adapter.
+# Encrypted rclone storage implementation.
 #
 # Locations use rclone:<crypt-remote>:<optional-root>. The named rclone remote
 # must be a configured crypt backend. Provider credentials, crypt passwords,
@@ -52,7 +52,6 @@ alv_rclone_storage_validate_root() {
 
 alv_rclone_storage_open() {
   ALV_RCLONE_STORAGE_LOCATION=$1
-  ALV_RCLONE_STORAGE_MODE=$2
   ALV_RCLONE_STORAGE_INPUT=${ALV_RCLONE_STORAGE_LOCATION#rclone:}
 
   command -v rclone >/dev/null 2>&1 || \
@@ -120,7 +119,7 @@ alv_rclone_storage_refresh_listing() {
 
   case "$ALV_RCLONE_STORAGE_LIST_STATUS" in
     3) ALV_RCLONE_STORAGE_LISTING= ;;
-    *) alv_fail "could not list rclone location: $ALV_STORAGE_LOCATION" ;;
+    *) alv_fail "could not list rclone location: $ALV_RCLONE_STORAGE_LOCATION" ;;
   esac
 }
 
@@ -294,6 +293,8 @@ alv_rclone_storage_get() {
     alv_fail "restored bytes do not match the rclone checksum"
 
   ALV_STORAGE_HASH=$ALV_COPY_HASH
+  # Consumed by command workflows in the main executable.
+  # shellcheck disable=SC2034
   ALV_STORAGE_SIZE=$(alv_file_size "$ALV_RCLONE_GET_DESTINATION")
   alv_rclone_storage_cleanup
 }
@@ -321,6 +322,8 @@ alv_rclone_storage_has() {
   ALV_STORAGE_PRESENT=false
   if alv_rclone_storage_listing_has "$ALV_RCLONE_HAS_NAME" && \
      alv_rclone_storage_listing_has "$ALV_RCLONE_HAS_NAME.sha256"; then
+    # Consumed by command workflows in the main executable.
+    # shellcheck disable=SC2034
     ALV_STORAGE_PRESENT=true
   fi
 }

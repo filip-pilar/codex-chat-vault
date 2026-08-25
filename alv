@@ -12,14 +12,14 @@ case "$ALV_LAUNCHER_PATH" in
   } ;;
 esac
 while [ -L "$ALV_LAUNCHER_PATH" ]; do
-  ALV_LINK_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || exit 1
+  ALV_LINK_DIRECTORY=$(CDPATH='' cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || exit 1
   ALV_LINK_TARGET=$(readlink "$ALV_LAUNCHER_PATH") || exit 1
   case "$ALV_LINK_TARGET" in
     /*) ALV_LAUNCHER_PATH=$ALV_LINK_TARGET ;;
     *) ALV_LAUNCHER_PATH=$ALV_LINK_DIRECTORY/$ALV_LINK_TARGET ;;
   esac
 done
-ALV_LAUNCHER_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || {
+ALV_LAUNCHER_DIRECTORY=$(CDPATH='' cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || {
   printf 'alv: cannot locate agent-log-vault executable\n' >&2
   exit 1
 }

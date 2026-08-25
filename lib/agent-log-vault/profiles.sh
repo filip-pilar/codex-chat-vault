@@ -128,6 +128,8 @@ alv_profile_load() {
     rclone:*) ;;
     *) alv_fail "vault profile does not reference encrypted rclone storage" ;;
   esac
+  # Consumed by command workflows in the main executable.
+  # shellcheck disable=SC2034
   ALV_PROFILE_NAME=$ALV_PROFILE_LOAD_NAME
 }
 
@@ -155,10 +157,15 @@ alv_profile_save() {
   ALV_PROFILE_SAVE_NAME=$1
   ALV_PROFILE_SAVE_PROVIDER=$2
   ALV_PROFILE_SAVE_LOCATION=$3
+  ALV_PROFILE_SAVE_SETUP_MARKER=${4:-}
 
   alv_profile_validate_name "$ALV_PROFILE_SAVE_NAME"
   alv_profile_validate_value "$ALV_PROFILE_SAVE_PROVIDER" provider
   alv_profile_validate_value "$ALV_PROFILE_SAVE_LOCATION" location
+  if [ -n "$ALV_PROFILE_SAVE_SETUP_MARKER" ]; then
+    alv_profile_validate_value \
+      "$ALV_PROFILE_SAVE_SETUP_MARKER" "setup marker"
+  fi
   alv_profiles_prepare
   alv_profile_directory "$ALV_PROFILE_SAVE_NAME"
   [ ! -e "$ALV_PROFILE_DIRECTORY" ] && [ ! -L "$ALV_PROFILE_DIRECTORY" ] || \
@@ -174,6 +181,11 @@ alv_profile_save() {
   chmod 600 \
     "$ALV_PROFILE_TEMP_DIRECTORY/provider" \
     "$ALV_PROFILE_TEMP_DIRECTORY/location"
+  if [ -n "$ALV_PROFILE_SAVE_SETUP_MARKER" ]; then
+    printf '%s\n' "$ALV_PROFILE_SAVE_SETUP_MARKER" > \
+      "$ALV_PROFILE_TEMP_DIRECTORY/.setup-marker"
+    chmod 600 "$ALV_PROFILE_TEMP_DIRECTORY/.setup-marker"
+  fi
   mv "$ALV_PROFILE_TEMP_DIRECTORY" "$ALV_PROFILE_DIRECTORY"
   ALV_PROFILE_TEMP_DIRECTORY=
 

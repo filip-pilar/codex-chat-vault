@@ -1,21 +1,18 @@
 #!/bin/sh
 
+# shellcheck disable=SC1091
+
 set -eu
 
 umask 077
 
 ALV_PROGRAM=${ALV_INVOKED_AS:-${0##*/}}
 ALV_TEMP_DATA=
-ALV_TEMP_SUM=
 
 alv_cleanup() {
   if [ -n "${ALV_TEMP_DATA:-}" ] && [ -e "$ALV_TEMP_DATA" ]; then
     unlink "$ALV_TEMP_DATA" 2>/dev/null || true
     ALV_TEMP_DATA=
-  fi
-  if [ -n "${ALV_TEMP_SUM:-}" ] && [ -e "$ALV_TEMP_SUM" ]; then
-    unlink "$ALV_TEMP_SUM" 2>/dev/null || true
-    ALV_TEMP_SUM=
   fi
   if command -v alv_vault_setup_cleanup >/dev/null 2>&1; then
     alv_vault_setup_cleanup
@@ -50,9 +47,10 @@ Usage:
   $ALV_PROGRAM vault use <name>
   $ALV_PROGRAM vault recovery <name> --output <file>
   $ALV_PROGRAM vault add local <name> --path <absolute-directory>
-  $ALV_PROGRAM vault add r2 <name> [provider options]
-  $ALV_PROGRAM vault add b2 <name> [provider options]
-  $ALV_PROGRAM vault add drive <name>
+  $ALV_PROGRAM vault add r2 <name> [options]
+  $ALV_PROGRAM vault add b2 <name> [options]
+  $ALV_PROGRAM vault add dropbox <name>
+  $ALV_PROGRAM vault add onedrive <name>
   $ALV_PROGRAM vault add rclone <name> --remote <existing-target>
 
 Commands:
@@ -72,6 +70,20 @@ Local list filters:
   --created-after <date>    Created after YYYY-MM-DD.
   --project <cwd-or-name>   Exact cwd or final directory name.
   --larger-than <size>      Size in bytes or with K, M, G, or T suffix.
+
+Provider setup options:
+  r2  --account-id <id> --access-key-id <id> --secret-access-key <key>
+      --bucket <name> [--endpoint <https-url>]
+  b2  --key-id <id> --application-key <key> --bucket <name>
+      [--endpoint <https-url>]
+  Omit provider values to be prompted privately. Do not put secrets in shell
+  history or agent-visible command logs.
+
+State locations:
+  Codex home    CODEX_HOME or ~/.codex
+  ALV profiles  ALV_CONFIG_HOME, XDG_CONFIG_HOME/agent-log-vault, or
+                ~/.config/agent-log-vault
+  Secrets       rclone's own configuration
 EOF
 }
 
@@ -89,7 +101,7 @@ trap 'exit 143' TERM
 
 alv_canonical_directory() {
   [ -d "$1" ] || alv_fail "directory does not exist: $1"
-  (CDPATH= cd -P "$1" 2>/dev/null && pwd -P) || \
+  (CDPATH='' cd -P "$1" 2>/dev/null && pwd -P) || \
     alv_fail "cannot resolve directory: $1"
 }
 
@@ -187,6 +199,8 @@ alv_copy_verified() {
 
   mv "$ALV_TEMP_DATA" "$ALV_COPY_DESTINATION"
   ALV_TEMP_DATA=
+  # Consumed by the sourced rclone storage implementation.
+  # shellcheck disable=SC2034
   ALV_COPY_HASH=$ALV_COPIED_HASH
 }
 
@@ -285,7 +299,7 @@ case "$ALV_SCRIPT_PATH" in
   *) ALV_SCRIPT_PATH=$(command -v "$ALV_SCRIPT_PATH") || alv_fail "cannot locate executable" ;;
 esac
 while [ -L "$ALV_SCRIPT_PATH" ]; do
-  ALV_SCRIPT_LINK_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
+  ALV_SCRIPT_LINK_DIRECTORY=$(CDPATH='' cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
     alv_fail "cannot resolve executable symlink directory"
   ALV_SCRIPT_LINK_TARGET=$(readlink "$ALV_SCRIPT_PATH") || \
     alv_fail "cannot resolve executable symlink"
@@ -294,12 +308,12 @@ while [ -L "$ALV_SCRIPT_PATH" ]; do
     *) ALV_SCRIPT_PATH=$ALV_SCRIPT_LINK_DIRECTORY/$ALV_SCRIPT_LINK_TARGET ;;
   esac
 done
-ALV_SCRIPT_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
+ALV_SCRIPT_DIRECTORY=$(CDPATH='' cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
   alv_fail "cannot locate library directory"
 ALV_LIBRARY_DIRECTORY=${AGENT_LOG_VAULT_LIB_DIR:-$ALV_SCRIPT_DIRECTORY/lib/agent-log-vault}
 
-[ -r "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh" ] || \
-  alv_fail "missing rclone adapter: $ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/rclone-storage.sh" ] || \
+  alv_fail "missing rclone storage implementation: $ALV_LIBRARY_DIRECTORY/rclone-storage.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/catalog.sh" ] || \
   alv_fail "missing catalog support: $ALV_LIBRARY_DIRECTORY/catalog.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/profiles.sh" ] || \
@@ -309,7 +323,7 @@ ALV_LIBRARY_DIRECTORY=${AGENT_LOG_VAULT_LIB_DIR:-$ALV_SCRIPT_DIRECTORY/lib/agent
 [ -r "$ALV_LIBRARY_DIRECTORY/vaults.sh" ] || \
   alv_fail "missing vault setup support: $ALV_LIBRARY_DIRECTORY/vaults.sh"
 
-. "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
+. "$ALV_LIBRARY_DIRECTORY/rclone-storage.sh"
 . "$ALV_LIBRARY_DIRECTORY/catalog.sh"
 . "$ALV_LIBRARY_DIRECTORY/profiles.sh"
 . "$ALV_LIBRARY_DIRECTORY/storage.sh"
@@ -406,7 +420,7 @@ alv_command_list() {
         [ -z "$ALV_LIST_LARGER_THAN" ] || \
         alv_fail "metadata filters are only valid when listing local"
       alv_profile_load_selected "$ALV_LIST_VAULT"
-      alv_storage_open "$ALV_PROFILE_LOCATION" read
+      alv_storage_open "$ALV_PROFILE_LOCATION"
       alv_storage_list
       ;;
     *) alv_fail "list requires local or cold" ;;
@@ -468,7 +482,7 @@ alv_command_offload() {
 
   alv_resolve_codex_source "$ALV_OFFLOAD_CHAT" "$ALV_OFFLOAD_CODEX_HOME"
   alv_profile_load_selected "$ALV_OFFLOAD_VAULT"
-  alv_storage_open "$ALV_PROFILE_LOCATION" write
+  alv_storage_open "$ALV_PROFILE_LOCATION"
   alv_storage_assert_external_to "$ALV_CODEX_SOURCE_HOME"
 
   ALV_OFFLOAD_HASH_BEFORE=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
@@ -528,7 +542,7 @@ alv_command_verify() {
   done
 
   alv_profile_load_selected "$ALV_VERIFY_VAULT"
-  alv_storage_open "$ALV_PROFILE_LOCATION" read
+  alv_storage_open "$ALV_PROFILE_LOCATION"
   alv_storage_verify "$ALV_VERIFY_NAME"
 
   ALV_VERIFY_STATE=cold-only
@@ -590,7 +604,7 @@ alv_command_restore() {
   done
 
   alv_profile_load_selected "$ALV_RESTORE_VAULT"
-  alv_storage_open "$ALV_PROFILE_LOCATION" read
+  alv_storage_open "$ALV_PROFILE_LOCATION"
   if [ -n "$ALV_RESTORE_CODEX_HOME" ]; then
     ALV_RESTORE_TARGET_HOME=$(alv_canonical_directory "$ALV_RESTORE_CODEX_HOME")
   else
@@ -629,6 +643,8 @@ alv_command_vault_add() {
   ALV_VAULT_ADD_SECRET=
   ALV_VAULT_ADD_BUCKET=
   ALV_VAULT_ADD_ENDPOINT=
+  ALV_VAULT_ADD_ACCOUNT_OPTION=
+  ALV_VAULT_ADD_SECRET_OPTION=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --path)
@@ -646,6 +662,7 @@ alv_command_vault_add() {
       --account-id|--key-id)
         [ "$#" -ge 2 ] || alv_fail "$1 requires a value"
         [ -z "$ALV_VAULT_ADD_ACCOUNT" ] || alv_fail "account/key ID was provided more than once"
+        ALV_VAULT_ADD_ACCOUNT_OPTION=$1
         ALV_VAULT_ADD_ACCOUNT=$2
         shift 2
         ;;
@@ -659,6 +676,7 @@ alv_command_vault_add() {
       --secret-access-key|--application-key)
         [ "$#" -ge 2 ] || alv_fail "$1 requires a value"
         [ -z "$ALV_VAULT_ADD_SECRET" ] || alv_fail "provider secret was provided more than once"
+        ALV_VAULT_ADD_SECRET_OPTION=$1
         ALV_VAULT_ADD_SECRET=$2
         shift 2
         ;;
@@ -689,6 +707,14 @@ alv_command_vault_add() {
     r2)
       [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE" ] || \
         alv_fail "R2 vault does not accept --path or --remote"
+      case "$ALV_VAULT_ADD_ACCOUNT_OPTION" in
+        ''|--account-id) ;;
+        *) alv_fail "R2 vault accepts --account-id, not $ALV_VAULT_ADD_ACCOUNT_OPTION" ;;
+      esac
+      case "$ALV_VAULT_ADD_SECRET_OPTION" in
+        ''|--secret-access-key) ;;
+        *) alv_fail "R2 vault accepts --secret-access-key, not $ALV_VAULT_ADD_SECRET_OPTION" ;;
+      esac
       alv_vault_add_r2 \
         "$ALV_VAULT_ADD_NAME" \
         "$ALV_VAULT_ADD_ACCOUNT" \
@@ -700,6 +726,14 @@ alv_command_vault_add() {
     b2)
       [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE$ALV_VAULT_ADD_ACCESS" ] || \
         alv_fail "B2 vault does not accept --path, --remote, or --access-key-id"
+      case "$ALV_VAULT_ADD_ACCOUNT_OPTION" in
+        ''|--key-id) ;;
+        *) alv_fail "B2 vault accepts --key-id, not $ALV_VAULT_ADD_ACCOUNT_OPTION" ;;
+      esac
+      case "$ALV_VAULT_ADD_SECRET_OPTION" in
+        ''|--application-key) ;;
+        *) alv_fail "B2 vault accepts --application-key, not $ALV_VAULT_ADD_SECRET_OPTION" ;;
+      esac
       alv_vault_add_b2 \
         "$ALV_VAULT_ADD_NAME" \
         "$ALV_VAULT_ADD_ACCOUNT" \
@@ -707,10 +741,14 @@ alv_command_vault_add() {
         "$ALV_VAULT_ADD_BUCKET" \
         "$ALV_VAULT_ADD_ENDPOINT"
       ;;
-    drive)
+    dropbox|onedrive)
       [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE$ALV_VAULT_ADD_ACCOUNT$ALV_VAULT_ADD_ACCESS$ALV_VAULT_ADD_SECRET$ALV_VAULT_ADD_BUCKET$ALV_VAULT_ADD_ENDPOINT" ] || \
-        alv_fail "Drive vault does not accept provider options"
-      alv_vault_add_drive "$ALV_VAULT_ADD_NAME"
+        alv_fail "$ALV_VAULT_ADD_PROVIDER vault does not accept provider options"
+      if [ "$ALV_VAULT_ADD_PROVIDER" = dropbox ]; then
+        alv_vault_add_dropbox "$ALV_VAULT_ADD_NAME"
+      else
+        alv_vault_add_onedrive "$ALV_VAULT_ADD_NAME"
+      fi
       ;;
     rclone)
       [ -n "$ALV_VAULT_ADD_REMOTE" ] || alv_fail "rclone vault requires --remote"

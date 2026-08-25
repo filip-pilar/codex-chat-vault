@@ -1,17 +1,15 @@
-# Tiny storage dispatcher. V1 has one implementation: an encrypted rclone
-# remote. Provider helpers configure rclone rather than adding runtime adapters.
+# Storage boundary. The sole implementation is encrypted rclone; provider
+# helpers only configure rclone.
 
 alv_storage_open() {
   ALV_STORAGE_LOCATION=$1
-  ALV_STORAGE_MODE=$2
 
   case "$ALV_STORAGE_LOCATION" in
     rclone:*) ;;
     file:*) alv_fail "plaintext file: vaults are not supported" ;;
     *) alv_fail "vault profile has an unsupported storage location" ;;
   esac
-  ALV_STORAGE_ADAPTER=rclone
-  alv_rclone_storage_open "$ALV_STORAGE_LOCATION" "$ALV_STORAGE_MODE"
+  alv_rclone_storage_open "$ALV_STORAGE_LOCATION"
 }
 
 alv_storage_put() {

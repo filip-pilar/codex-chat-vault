@@ -2,11 +2,28 @@
 # crypt configuration; agent-log-vault stores only named profile references.
 
 ALV_VAULT_CREATED_REMOTES=
+ALV_VAULT_SETUP_MARKER=
 ALV_VAULT_PROBE_TARGET=
+ALV_VAULT_PROBE_DELETE_FLAG=
 ALV_VAULT_TEMP_BASE=
 ALV_VAULT_TEMP_DIRECTORY=
 ALV_VAULT_STTY_ECHO_DISABLED=false
 ALV_VAULT_RECOVERY_TEMP=
+ALV_VAULT_PENDING_PROFILE=
+ALV_VAULT_PENDING_DEFAULT=false
+ALV_VAULT_PRESERVE_CREATED_REMOTES=false
+
+alv_vault_delete_probe() {
+  [ -n "$ALV_VAULT_PROBE_TARGET" ] || return 0
+  if [ -n "$ALV_VAULT_PROBE_DELETE_FLAG" ]; then
+    rclone deletefile \
+      "$ALV_VAULT_PROBE_TARGET" \
+      "$ALV_VAULT_PROBE_DELETE_FLAG" \
+      --quiet
+  else
+    rclone deletefile "$ALV_VAULT_PROBE_TARGET" --quiet
+  fi
+}
 
 alv_vault_probe_cleanup() {
   if [ "$ALV_VAULT_STTY_ECHO_DISABLED" = true ]; then
@@ -16,9 +33,10 @@ alv_vault_probe_cleanup() {
   fi
 
   if [ -n "$ALV_VAULT_PROBE_TARGET" ]; then
-    rclone deletefile "$ALV_VAULT_PROBE_TARGET" --quiet >/dev/null 2>&1 || true
+    alv_vault_delete_probe >/dev/null 2>&1 || true
     ALV_VAULT_PROBE_TARGET=
   fi
+  ALV_VAULT_PROBE_DELETE_FLAG=
 
   if [ -n "$ALV_VAULT_TEMP_DIRECTORY" ]; then
     case "$ALV_VAULT_TEMP_DIRECTORY" in
@@ -30,6 +48,90 @@ alv_vault_probe_cleanup() {
     esac
     ALV_VAULT_TEMP_DIRECTORY=
   fi
+}
+
+# The setup marker remains in a newly placed profile until its default-vault
+# update succeeds. Removing the marker is the durable setup commit point.
+alv_vault_pending_profile_cleanup() {
+  ALV_VAULT_PRESERVE_CREATED_REMOTES=false
+  [ -n "$ALV_VAULT_PENDING_PROFILE" ] || return 0
+  [ -n "$ALV_VAULT_SETUP_MARKER" ] || return 0
+
+  alv_profiles_resolve_home
+  ALV_VAULT_PENDING_DIRECTORY=$ALV_PROFILE_VAULTS/$ALV_VAULT_PENDING_PROFILE
+  ALV_VAULT_PENDING_MARKER=$ALV_VAULT_PENDING_DIRECTORY/.setup-marker
+  if [ ! -e "$ALV_VAULT_PENDING_DIRECTORY" ] && \
+     [ ! -L "$ALV_VAULT_PENDING_DIRECTORY" ]; then
+    ALV_VAULT_PENDING_PROFILE=
+    ALV_VAULT_PENDING_DEFAULT=false
+    return 0
+  fi
+  if [ ! -d "$ALV_VAULT_PENDING_DIRECTORY" ] || \
+     [ -L "$ALV_VAULT_PENDING_DIRECTORY" ]; then
+    ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+    ALV_VAULT_PENDING_PROFILE=
+    ALV_VAULT_PENDING_DEFAULT=false
+    return 0
+  fi
+
+  if [ ! -e "$ALV_VAULT_PENDING_MARKER" ] && \
+     [ ! -L "$ALV_VAULT_PENDING_MARKER" ]; then
+    ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+    ALV_VAULT_PENDING_PROFILE=
+    ALV_VAULT_PENDING_DEFAULT=false
+    return 0
+  fi
+
+  ALV_VAULT_PENDING_COUNT=$(find "$ALV_VAULT_PENDING_DIRECTORY" \
+    -mindepth 1 -maxdepth 1 -print 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [ "$ALV_VAULT_PENDING_COUNT" != 3 ] || \
+     [ ! -f "$ALV_VAULT_PENDING_DIRECTORY/provider" ] || \
+     [ -L "$ALV_VAULT_PENDING_DIRECTORY/provider" ] || \
+     [ ! -f "$ALV_VAULT_PENDING_DIRECTORY/location" ] || \
+     [ -L "$ALV_VAULT_PENDING_DIRECTORY/location" ] || \
+     [ ! -f "$ALV_VAULT_PENDING_MARKER" ] || \
+     [ -L "$ALV_VAULT_PENDING_MARKER" ]; then
+    ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+    ALV_VAULT_PENDING_PROFILE=
+    ALV_VAULT_PENDING_DEFAULT=false
+    return 0
+  fi
+
+  ALV_VAULT_PENDING_MARKER_VALUE=
+  IFS= read -r ALV_VAULT_PENDING_MARKER_VALUE < \
+    "$ALV_VAULT_PENDING_MARKER" || true
+  if [ "$ALV_VAULT_PENDING_MARKER_VALUE" != "$ALV_VAULT_SETUP_MARKER" ]; then
+    ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+    ALV_VAULT_PENDING_PROFILE=
+    ALV_VAULT_PENDING_DEFAULT=false
+    return 0
+  fi
+
+  if [ "$ALV_VAULT_PENDING_DEFAULT" = true ] && \
+     [ -f "$ALV_PROFILE_DEFAULT_FILE" ] && \
+     [ ! -L "$ALV_PROFILE_DEFAULT_FILE" ]; then
+    ALV_VAULT_PENDING_DEFAULT_VALUE=
+    IFS= read -r ALV_VAULT_PENDING_DEFAULT_VALUE < \
+      "$ALV_PROFILE_DEFAULT_FILE" || true
+    if [ "$ALV_VAULT_PENDING_DEFAULT_VALUE" = \
+         "$ALV_VAULT_PENDING_PROFILE" ]; then
+      if ! unlink "$ALV_PROFILE_DEFAULT_FILE"; then
+        ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+        ALV_VAULT_PENDING_PROFILE=
+        ALV_VAULT_PENDING_DEFAULT=false
+        return 0
+      fi
+    fi
+  fi
+
+  if ! unlink "$ALV_VAULT_PENDING_MARKER" || \
+     ! unlink "$ALV_VAULT_PENDING_DIRECTORY/provider" || \
+     ! unlink "$ALV_VAULT_PENDING_DIRECTORY/location" || \
+     ! rmdir "$ALV_VAULT_PENDING_DIRECTORY"; then
+    ALV_VAULT_PRESERVE_CREATED_REMOTES=true
+  fi
+  ALV_VAULT_PENDING_PROFILE=
+  ALV_VAULT_PENDING_DEFAULT=false
 }
 
 alv_vault_setup_cleanup() {
@@ -44,14 +146,23 @@ alv_vault_setup_cleanup() {
     esac
     ALV_VAULT_RECOVERY_TEMP=
   fi
-  if [ -n "$ALV_VAULT_CREATED_REMOTES" ]; then
+  alv_vault_pending_profile_cleanup
+  if [ -n "$ALV_VAULT_CREATED_REMOTES" ] && \
+     [ -n "$ALV_VAULT_SETUP_MARKER" ] && \
+     [ "$ALV_VAULT_PRESERVE_CREATED_REMOTES" != true ]; then
     printf '%s\n' "$ALV_VAULT_CREATED_REMOTES" |
       while IFS= read -r ALV_VAULT_CLEANUP_REMOTE; do
         [ -n "$ALV_VAULT_CLEANUP_REMOTE" ] || continue
+        ALV_VAULT_CLEANUP_CONFIG=$(rclone config redacted \
+          "$ALV_VAULT_CLEANUP_REMOTE" 2>/dev/null) || continue
+        printf '%s\n' "$ALV_VAULT_CLEANUP_CONFIG" | grep -Fqx \
+          "description = $ALV_VAULT_SETUP_MARKER" || continue
         rclone config delete "$ALV_VAULT_CLEANUP_REMOTE" >/dev/null 2>&1 || true
       done
-    ALV_VAULT_CREATED_REMOTES=
   fi
+  ALV_VAULT_CREATED_REMOTES=
+  ALV_VAULT_SETUP_MARKER=
+  ALV_VAULT_PRESERVE_CREATED_REMOTES=false
 }
 
 alv_vault_require_rclone() {
@@ -74,10 +185,14 @@ alv_vault_require_new_remote() {
   fi
 }
 
-alv_vault_record_created_remote() {
+alv_vault_plan_remote() {
+  alv_vault_require_new_remote "$1"
+  if [ -z "$ALV_VAULT_SETUP_MARKER" ]; then
+    ALV_VAULT_SETUP_MARKER=agent-log-vault-managed-$(alv_vault_generate_secret)
+  fi
   if [ -n "$ALV_VAULT_CREATED_REMOTES" ]; then
-    ALV_VAULT_CREATED_REMOTES=$ALV_VAULT_CREATED_REMOTES'
-'$1
+    ALV_VAULT_CREATED_REMOTES=$1'
+'$ALV_VAULT_CREATED_REMOTES
   else
     ALV_VAULT_CREATED_REMOTES=$1
   fi
@@ -94,7 +209,7 @@ alv_vault_generate_secret() {
 alv_vault_create_crypt() {
   ALV_VAULT_CRYPT_REMOTE=$1
   ALV_VAULT_CRYPT_TARGET=$2
-  alv_vault_require_new_remote "$ALV_VAULT_CRYPT_REMOTE"
+  alv_vault_plan_remote "$ALV_VAULT_CRYPT_REMOTE"
 
   ALV_VAULT_CRYPT_PASSWORD=$(alv_vault_generate_secret)
   ALV_VAULT_CRYPT_PASSWORD2=$(alv_vault_generate_secret)
@@ -107,13 +222,13 @@ alv_vault_create_crypt() {
     no_data_encryption false \
     password "$ALV_VAULT_CRYPT_PASSWORD" \
     password2 "$ALV_VAULT_CRYPT_PASSWORD2" \
+    description "$ALV_VAULT_SETUP_MARKER" \
     --obscure \
     --no-output >/dev/null 2>&1; then
     alv_fail "could not create encrypted rclone remote"
   fi
   ALV_VAULT_CRYPT_PASSWORD=
   ALV_VAULT_CRYPT_PASSWORD2=
-  alv_vault_record_created_remote "$ALV_VAULT_CRYPT_REMOTE"
 }
 
 alv_vault_make_temp() {
@@ -128,7 +243,7 @@ alv_vault_make_temp() {
 
 alv_vault_probe_location() {
   ALV_VAULT_PROBE_LOCATION=$1
-  alv_rclone_storage_open "$ALV_VAULT_PROBE_LOCATION" write
+  alv_rclone_storage_open "$ALV_VAULT_PROBE_LOCATION"
   alv_vault_make_temp
 
   ALV_VAULT_PROBE_ID=$$-${ALV_VAULT_TEMP_DIRECTORY##*.}
@@ -161,7 +276,7 @@ alv_vault_probe_location() {
   fi
   cmp -s "$ALV_VAULT_PROBE_SOURCE" "$ALV_VAULT_PROBE_RESULT" || \
     alv_fail "vault setup read-back did not match the uploaded bytes"
-  if ! rclone deletefile "$ALV_VAULT_PROBE_TARGET" --quiet; then
+  if ! alv_vault_delete_probe; then
     alv_fail "vault setup probe could not be removed"
   fi
   ALV_VAULT_PROBE_TARGET=
@@ -172,12 +287,41 @@ alv_vault_save_validated() {
   ALV_VAULT_SAVE_NAME=$1
   ALV_VAULT_SAVE_PROVIDER=$2
   ALV_VAULT_SAVE_LOCATION=$3
+  ALV_VAULT_PROBE_DELETE_FLAG=${4:-}
   alv_vault_probe_location "$ALV_VAULT_SAVE_LOCATION"
+  if [ -z "$ALV_VAULT_SETUP_MARKER" ]; then
+    ALV_VAULT_SETUP_MARKER=agent-log-vault-managed-$(alv_vault_generate_secret)
+  fi
+  alv_profiles_resolve_home
+  if [ ! -e "$ALV_PROFILE_DEFAULT_FILE" ] && \
+     [ ! -L "$ALV_PROFILE_DEFAULT_FILE" ]; then
+    ALV_VAULT_PENDING_DEFAULT=true
+  else
+    ALV_VAULT_PENDING_DEFAULT=false
+  fi
+  ALV_VAULT_PENDING_PROFILE=$ALV_VAULT_SAVE_NAME
   alv_profile_save \
     "$ALV_VAULT_SAVE_NAME" \
     "$ALV_VAULT_SAVE_PROVIDER" \
-    "$ALV_VAULT_SAVE_LOCATION"
+    "$ALV_VAULT_SAVE_LOCATION" \
+    "$ALV_VAULT_SETUP_MARKER"
+  alv_profile_directory "$ALV_VAULT_SAVE_NAME"
+  ALV_VAULT_PROFILE_MARKER=$ALV_PROFILE_DIRECTORY/.setup-marker
+  [ -f "$ALV_VAULT_PROFILE_MARKER" ] && \
+    [ ! -L "$ALV_VAULT_PROFILE_MARKER" ] || \
+    alv_fail "vault profile setup marker is missing"
+  ALV_VAULT_PROFILE_MARKER_VALUE=
+  IFS= read -r ALV_VAULT_PROFILE_MARKER_VALUE < \
+    "$ALV_VAULT_PROFILE_MARKER" || true
+  [ "$ALV_VAULT_PROFILE_MARKER_VALUE" = "$ALV_VAULT_SETUP_MARKER" ] || \
+    alv_fail "vault profile setup marker changed"
+  if ! unlink "$ALV_VAULT_PROFILE_MARKER"; then
+    alv_fail "could not finalize the vault profile"
+  fi
+  ALV_VAULT_PENDING_PROFILE=
+  ALV_VAULT_PENDING_DEFAULT=false
   ALV_VAULT_CREATED_REMOTES=
+  ALV_VAULT_SETUP_MARKER=
 }
 
 alv_vault_local_assert_external() {
@@ -350,7 +494,7 @@ alv_vault_add_r2() {
 
   ALV_VAULT_R2_BACKING=alv-$ALV_VAULT_R2_NAME-r2
   ALV_VAULT_R2_CRYPT=alv-$ALV_VAULT_R2_NAME-crypt
-  alv_vault_require_new_remote "$ALV_VAULT_R2_BACKING"
+  alv_vault_plan_remote "$ALV_VAULT_R2_BACKING"
   if ! rclone config create \
     "$ALV_VAULT_R2_BACKING" \
     s3 \
@@ -362,12 +506,12 @@ alv_vault_add_r2() {
     endpoint "$ALV_VAULT_R2_ENDPOINT" \
     acl private \
     no_check_bucket true \
+    description "$ALV_VAULT_SETUP_MARKER" \
     --obscure \
     --no-output >/dev/null 2>&1; then
     alv_fail "could not create the R2 rclone remote"
   fi
   ALV_VAULT_R2_SECRET=
-  alv_vault_record_created_remote "$ALV_VAULT_R2_BACKING"
   alv_vault_create_crypt \
     "$ALV_VAULT_R2_CRYPT" \
     "$ALV_VAULT_R2_BACKING:$ALV_VAULT_R2_BUCKET/agent-log-vault/$ALV_VAULT_R2_NAME"
@@ -384,7 +528,8 @@ alv_vault_add_b2() {
 
   alv_vault_require_rclone
   alv_vault_require_new_profile "$ALV_VAULT_B2_NAME"
-  printf 'Use a B2 Read and Write application key for the existing bucket.\n' >&2
+  printf '%s\n' \
+    'Use a bucket-scoped B2 Read and Write application key for the existing bucket.' >&2
   alv_vault_value_or_prompt "$ALV_VAULT_B2_ACCOUNT_INPUT" "B2 application key ID"
   ALV_VAULT_B2_ACCOUNT=$ALV_VAULT_RESOLVED_VALUE
   alv_vault_secret_or_prompt "$ALV_VAULT_B2_KEY_INPUT" "B2 application key"
@@ -400,7 +545,7 @@ alv_vault_add_b2() {
 
   ALV_VAULT_B2_BACKING=alv-$ALV_VAULT_B2_NAME-b2
   ALV_VAULT_B2_CRYPT=alv-$ALV_VAULT_B2_NAME-crypt
-  alv_vault_require_new_remote "$ALV_VAULT_B2_BACKING"
+  alv_vault_plan_remote "$ALV_VAULT_B2_BACKING"
   if [ -n "$ALV_VAULT_B2_ENDPOINT_INPUT" ]; then
     if ! rclone config create \
       "$ALV_VAULT_B2_BACKING" \
@@ -409,6 +554,7 @@ alv_vault_add_b2() {
       key "$ALV_VAULT_B2_KEY" \
       endpoint "$ALV_VAULT_B2_ENDPOINT_INPUT" \
       hard_delete false \
+      description "$ALV_VAULT_SETUP_MARKER" \
       --obscure \
       --no-output >/dev/null 2>&1; then
       alv_fail "could not create the B2 rclone remote"
@@ -420,42 +566,85 @@ alv_vault_add_b2() {
       account "$ALV_VAULT_B2_ACCOUNT" \
       key "$ALV_VAULT_B2_KEY" \
       hard_delete false \
+      description "$ALV_VAULT_SETUP_MARKER" \
       --obscure \
       --no-output >/dev/null 2>&1; then
       alv_fail "could not create the B2 rclone remote"
     fi
   fi
   ALV_VAULT_B2_KEY=
-  alv_vault_record_created_remote "$ALV_VAULT_B2_BACKING"
   alv_vault_create_crypt \
     "$ALV_VAULT_B2_CRYPT" \
     "$ALV_VAULT_B2_BACKING:$ALV_VAULT_B2_BUCKET/agent-log-vault/$ALV_VAULT_B2_NAME"
   alv_vault_save_validated \
-    "$ALV_VAULT_B2_NAME" b2 "rclone:$ALV_VAULT_B2_CRYPT:"
+    "$ALV_VAULT_B2_NAME" b2 "rclone:$ALV_VAULT_B2_CRYPT:" \
+    --b2-hard-delete
 }
 
-alv_vault_add_drive() {
-  ALV_VAULT_DRIVE_NAME=$1
+alv_vault_add_dropbox() {
+  ALV_VAULT_DROPBOX_NAME=$1
   alv_vault_require_rclone
-  alv_vault_require_new_profile "$ALV_VAULT_DRIVE_NAME"
-  ALV_VAULT_DRIVE_BACKING=alv-$ALV_VAULT_DRIVE_NAME-drive
-  ALV_VAULT_DRIVE_CRYPT=alv-$ALV_VAULT_DRIVE_NAME-crypt
-  alv_vault_require_new_remote "$ALV_VAULT_DRIVE_BACKING"
+  alv_vault_require_new_profile "$ALV_VAULT_DROPBOX_NAME"
+  ALV_VAULT_DROPBOX_BACKING=alv-$ALV_VAULT_DROPBOX_NAME-dropbox
+  ALV_VAULT_DROPBOX_CRYPT=alv-$ALV_VAULT_DROPBOX_NAME-crypt
+  alv_vault_plan_remote "$ALV_VAULT_DROPBOX_BACKING"
 
-  printf 'rclone will open Google OAuth in your browser.\n' >&2
+  printf 'rclone will open Dropbox authorization in your browser.\n' >&2
   if ! rclone config create \
-    "$ALV_VAULT_DRIVE_BACKING" \
-    drive \
-    scope drive.file \
-    config_is_local true; then
-    alv_fail "Google Drive authorization failed"
+    "$ALV_VAULT_DROPBOX_BACKING" \
+    dropbox \
+    config_is_local true \
+    description "$ALV_VAULT_SETUP_MARKER" \
+    --no-output; then
+    alv_fail "Dropbox authorization failed"
   fi
-  alv_vault_record_created_remote "$ALV_VAULT_DRIVE_BACKING"
   alv_vault_create_crypt \
-    "$ALV_VAULT_DRIVE_CRYPT" \
-    "$ALV_VAULT_DRIVE_BACKING:agent-log-vault/$ALV_VAULT_DRIVE_NAME"
+    "$ALV_VAULT_DROPBOX_CRYPT" \
+    "$ALV_VAULT_DROPBOX_BACKING:agent-log-vault/$ALV_VAULT_DROPBOX_NAME"
   alv_vault_save_validated \
-    "$ALV_VAULT_DRIVE_NAME" drive "rclone:$ALV_VAULT_DRIVE_CRYPT:"
+    "$ALV_VAULT_DROPBOX_NAME" dropbox "rclone:$ALV_VAULT_DROPBOX_CRYPT:"
+}
+
+alv_vault_add_onedrive() {
+  ALV_VAULT_ONEDRIVE_NAME=$1
+  alv_vault_require_rclone
+  alv_vault_require_new_profile "$ALV_VAULT_ONEDRIVE_NAME"
+  ALV_VAULT_ONEDRIVE_BACKING=alv-$ALV_VAULT_ONEDRIVE_NAME-onedrive
+  ALV_VAULT_ONEDRIVE_CRYPT=alv-$ALV_VAULT_ONEDRIVE_NAME-crypt
+  alv_vault_plan_remote "$ALV_VAULT_ONEDRIVE_BACKING"
+
+  printf 'rclone will open OneDrive authorization in your browser.\n' >&2
+  if ! rclone config create \
+    "$ALV_VAULT_ONEDRIVE_BACKING" \
+    onedrive \
+    config_is_local true \
+    config_type onedrive \
+    disable_site_permission true \
+    description "$ALV_VAULT_SETUP_MARKER" \
+    --no-output; then
+    alv_fail "OneDrive authorization failed"
+  fi
+
+  ALV_VAULT_ONEDRIVE_CONFIG=$(rclone config redacted \
+    "$ALV_VAULT_ONEDRIVE_BACKING" 2>/dev/null) || \
+    alv_fail "could not inspect the OneDrive rclone remote"
+  ALV_VAULT_ONEDRIVE_TYPE=$(printf '%s\n' "$ALV_VAULT_ONEDRIVE_CONFIG" | \
+    sed -n 's/^drive_type[[:space:]]*=[[:space:]]*//p' | sed -n '1p')
+  case "$ALV_VAULT_ONEDRIVE_TYPE" in
+    personal) ;;
+    business|documentLibrary)
+      alv_fail "OneDrive setup supports Personal only; configure this target manually with rclone and use 'vault add rclone'"
+      ;;
+    *)
+      alv_fail "could not confirm a OneDrive Personal target; configure it manually with rclone and use 'vault add rclone'"
+      ;;
+  esac
+
+  alv_vault_create_crypt \
+    "$ALV_VAULT_ONEDRIVE_CRYPT" \
+    "$ALV_VAULT_ONEDRIVE_BACKING:agent-log-vault/$ALV_VAULT_ONEDRIVE_NAME"
+  alv_vault_save_validated \
+    "$ALV_VAULT_ONEDRIVE_NAME" onedrive "rclone:$ALV_VAULT_ONEDRIVE_CRYPT:"
 }
 
 alv_vault_target_parts() {
@@ -519,7 +708,7 @@ alv_vault_export_recovery() {
   ALV_VAULT_RECOVERY_NAME=$1
   ALV_VAULT_RECOVERY_OUTPUT=$2
   alv_profile_load "$ALV_VAULT_RECOVERY_NAME"
-  alv_rclone_storage_open "$ALV_PROFILE_LOCATION" read
+  alv_rclone_storage_open "$ALV_PROFILE_LOCATION"
 
   [ ! -e "$ALV_VAULT_RECOVERY_OUTPUT" ] && [ ! -L "$ALV_VAULT_RECOVERY_OUTPUT" ] || \
     alv_fail "refusing to overwrite recovery export: $ALV_VAULT_RECOVERY_OUTPUT"
