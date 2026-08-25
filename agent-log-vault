@@ -4,11 +4,25 @@ set -eu
 
 umask 077
 
-ALV_PROGRAM=${0##*/}
+ALV_PROGRAM=${ALV_INVOKED_AS:-${0##*/}}
 ALV_TEMP_DATA=
 ALV_TEMP_SUM=
 
 alv_cleanup() {
+  if [ -n "${ALV_TEMP_DATA:-}" ] && [ -e "$ALV_TEMP_DATA" ]; then
+    unlink "$ALV_TEMP_DATA" 2>/dev/null || true
+    ALV_TEMP_DATA=
+  fi
+  if [ -n "${ALV_TEMP_SUM:-}" ] && [ -e "$ALV_TEMP_SUM" ]; then
+    unlink "$ALV_TEMP_SUM" 2>/dev/null || true
+    ALV_TEMP_SUM=
+  fi
+  if command -v alv_vault_setup_cleanup >/dev/null 2>&1; then
+    alv_vault_setup_cleanup
+  fi
+  if command -v alv_profiles_cleanup >/dev/null 2>&1; then
+    alv_profiles_cleanup
+  fi
   if command -v alv_rclone_storage_cleanup >/dev/null 2>&1; then
     alv_rclone_storage_cleanup
   fi
@@ -26,29 +40,33 @@ alv_fail() {
 alv_usage() {
   cat <<EOF
 Usage:
-  $ALV_PROGRAM list codex [filters] [--codex-home <directory>]
-  $ALV_PROGRAM list <location>
+  $ALV_PROGRAM list local [filters] [--codex-home <directory>]
+  $ALV_PROGRAM list cold [--vault <name>]
+  $ALV_PROGRAM offload <thread> [--vault <name>] [--codex-home <directory>]
+  $ALV_PROGRAM restore <thread> [--vault <name>] [--codex-home <directory>]
+  $ALV_PROGRAM verify <thread> [--vault <name>] [--codex-home <directory>]
   $ALV_PROGRAM inspect <chat-or-path> [--codex-home <directory>]
-  $ALV_PROGRAM put <chat-or-path> --to <location> [--codex-home <directory>]
-  $ALV_PROGRAM verify <chat> --at <location>
-  $ALV_PROGRAM restore <chat> --from <location> [--codex-home <directory>]
-  $ALV_PROGRAM evict <chat-or-path> --verified-at <location> [--codex-home <directory>] --yes
-
-Locations:
-  file:/absolute/path                 A local directory or mounted filesystem.
-  rclone:<crypt-remote>:<root>        An encrypted, configured rclone remote.
+  $ALV_PROGRAM vault list
+  $ALV_PROGRAM vault use <name>
+  $ALV_PROGRAM vault recovery <name> --output <file>
+  $ALV_PROGRAM vault add local <name> --path <absolute-directory>
+  $ALV_PROGRAM vault add r2 <name> [provider options]
+  $ALV_PROGRAM vault add b2 <name> [provider options]
+  $ALV_PROGRAM vault add drive <name>
+  $ALV_PROGRAM vault add rclone <name> --remote <existing-target>
 
 Commands:
-  list      List completed chats in Codex or a storage location.
+  list      List chats in local Codex archives or the encrypted cold vault.
+  offload   Verify a cold copy, then remove the local archived copy.
+  restore   Restore a verified cold copy while retaining it in the vault.
+  verify    Read back and verify the encrypted cold copy.
   inspect   Show safe identifying metadata for one Codex archived chat.
-  put       Copy a Codex archived chat to storage and verify it.
-  verify    Verify a stored chat against its SHA-256 checksum.
-  restore   Restore a verified stored chat to Codex.
-  evict     Remove a Codex copy after a matching stored copy is verified.
+  vault     Add, select, list, or export recovery data for named vaults.
 
-put and restore never remove their source and never overwrite completed files.
+The first added vault is the default. Use --vault to select another vault for
+one command. Cold storage is always an rclone crypt remote.
 
-Codex list filters:
+Local list filters:
   --long                    Show creation time, bytes, cwd, and filename.
   --created-before <date>   Created before YYYY-MM-DD.
   --created-after <date>    Created after YYYY-MM-DD.
@@ -57,9 +75,17 @@ Codex list filters:
 EOF
 }
 
-trap 'alv_cleanup; exit 129' HUP
-trap 'alv_cleanup; exit 130' INT
-trap 'alv_cleanup; exit 143' TERM
+alv_exit_cleanup() {
+  ALV_EXIT_STATUS=$?
+  trap - 0
+  alv_cleanup
+  exit "$ALV_EXIT_STATUS"
+}
+
+trap alv_exit_cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 alv_canonical_directory() {
   [ -d "$1" ] || alv_fail "directory does not exist: $1"
@@ -189,10 +215,14 @@ alv_resolve_codex_source() {
       ALV_CODEX_SOURCE_HOME=${ALV_CODEX_SOURCE_DIRECTORY%/*}
 
       if [ -n "$ALV_SOURCE_HOME_INPUT" ]; then
-        ALV_EXPECTED_CODEX_HOME=$(alv_canonical_directory "$ALV_SOURCE_HOME_INPUT")
-        [ "$ALV_EXPECTED_CODEX_HOME" = "$ALV_CODEX_SOURCE_HOME" ] || \
-          alv_fail "source is not inside the requested Codex home"
+        ALV_EXPECTED_CODEX_HOME_RAW=$ALV_SOURCE_HOME_INPUT
+      else
+        ALV_EXPECTED_CODEX_HOME_RAW=$(alv_default_codex_home)
       fi
+      ALV_EXPECTED_CODEX_HOME=$(alv_canonical_directory \
+        "$ALV_EXPECTED_CODEX_HOME_RAW")
+      [ "$ALV_EXPECTED_CODEX_HOME" = "$ALV_CODEX_SOURCE_HOME" ] || \
+        alv_fail "source is not inside the selected Codex home"
       ;;
     *)
       ALV_CODEX_SOURCE_NAME=$(alv_rollout_name "$ALV_SOURCE_INPUT")
@@ -268,26 +298,30 @@ ALV_SCRIPT_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null
   alv_fail "cannot locate library directory"
 ALV_LIBRARY_DIRECTORY=${AGENT_LOG_VAULT_LIB_DIR:-$ALV_SCRIPT_DIRECTORY/lib/agent-log-vault}
 
-[ -r "$ALV_LIBRARY_DIRECTORY/adapters/file.sh" ] || \
-  alv_fail "missing filesystem adapter: $ALV_LIBRARY_DIRECTORY/adapters/file.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh" ] || \
   alv_fail "missing rclone adapter: $ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/catalog.sh" ] || \
   alv_fail "missing catalog support: $ALV_LIBRARY_DIRECTORY/catalog.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/profiles.sh" ] || \
+  alv_fail "missing vault profiles: $ALV_LIBRARY_DIRECTORY/profiles.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/storage.sh" ] || \
   alv_fail "missing storage dispatcher: $ALV_LIBRARY_DIRECTORY/storage.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/vaults.sh" ] || \
+  alv_fail "missing vault setup support: $ALV_LIBRARY_DIRECTORY/vaults.sh"
 
-. "$ALV_LIBRARY_DIRECTORY/adapters/file.sh"
 . "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
 . "$ALV_LIBRARY_DIRECTORY/catalog.sh"
+. "$ALV_LIBRARY_DIRECTORY/profiles.sh"
 . "$ALV_LIBRARY_DIRECTORY/storage.sh"
+. "$ALV_LIBRARY_DIRECTORY/vaults.sh"
 
 alv_command_list() {
-  [ "$#" -gt 0 ] || alv_fail "list requires codex or a storage location"
-  ALV_LIST_LOCATION=$1
+  [ "$#" -gt 0 ] || alv_fail "list requires local or cold"
+  ALV_LIST_SIDE=$1
   shift
 
   ALV_LIST_CODEX_HOME=
+  ALV_LIST_VAULT=
   ALV_LIST_LONG=false
   ALV_LIST_CREATED_BEFORE=
   ALV_LIST_CREATED_AFTER=
@@ -299,6 +333,12 @@ alv_command_list() {
         [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
         [ -z "$ALV_LIST_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
         ALV_LIST_CODEX_HOME=$2
+        shift 2
+        ;;
+      --vault)
+        [ "$#" -ge 2 ] || alv_fail "--vault requires a name"
+        [ -z "$ALV_LIST_VAULT" ] || alv_fail "--vault was provided more than once"
+        ALV_LIST_VAULT=$2
         shift 2
         ;;
       --long)
@@ -336,34 +376,41 @@ alv_command_list() {
     esac
   done
 
-  if [ "$ALV_LIST_LOCATION" = codex ]; then
-    if [ "$ALV_LIST_LONG" = true ] || \
-       [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
-       [ -n "$ALV_LIST_CREATED_AFTER" ] || \
-       [ -n "$ALV_LIST_PROJECT" ] || \
-       [ -n "$ALV_LIST_LARGER_THAN" ]; then
-      alv_catalog_list_codex \
-        "$ALV_LIST_CODEX_HOME" \
-        "$ALV_LIST_LONG" \
-        "$ALV_LIST_CREATED_BEFORE" \
-        "$ALV_LIST_CREATED_AFTER" \
-        "$ALV_LIST_PROJECT" \
-        "$ALV_LIST_LARGER_THAN"
-    else
-      alv_list_codex "$ALV_LIST_CODEX_HOME"
-    fi
-  else
-    [ -z "$ALV_LIST_CODEX_HOME" ] || \
-      alv_fail "--codex-home is only valid when listing codex"
-    [ "$ALV_LIST_LONG" = false ] && \
-      [ -z "$ALV_LIST_CREATED_BEFORE" ] && \
-      [ -z "$ALV_LIST_CREATED_AFTER" ] && \
-      [ -z "$ALV_LIST_PROJECT" ] && \
-      [ -z "$ALV_LIST_LARGER_THAN" ] || \
-      alv_fail "metadata filters are only valid when listing codex"
-    alv_storage_open "$ALV_LIST_LOCATION" read
-    alv_storage_list
-  fi
+  case "$ALV_LIST_SIDE" in
+    local)
+      [ -z "$ALV_LIST_VAULT" ] || \
+        alv_fail "--vault is only valid when listing cold"
+      if [ "$ALV_LIST_LONG" = true ] || \
+         [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
+         [ -n "$ALV_LIST_CREATED_AFTER" ] || \
+         [ -n "$ALV_LIST_PROJECT" ] || \
+         [ -n "$ALV_LIST_LARGER_THAN" ]; then
+        alv_catalog_list_codex \
+          "$ALV_LIST_CODEX_HOME" \
+          "$ALV_LIST_LONG" \
+          "$ALV_LIST_CREATED_BEFORE" \
+          "$ALV_LIST_CREATED_AFTER" \
+          "$ALV_LIST_PROJECT" \
+          "$ALV_LIST_LARGER_THAN"
+      else
+        alv_list_codex "$ALV_LIST_CODEX_HOME"
+      fi
+      ;;
+    cold)
+      [ -z "$ALV_LIST_CODEX_HOME" ] || \
+        alv_fail "--codex-home is only valid when listing local"
+      [ "$ALV_LIST_LONG" = false ] && \
+        [ -z "$ALV_LIST_CREATED_BEFORE" ] && \
+        [ -z "$ALV_LIST_CREATED_AFTER" ] && \
+        [ -z "$ALV_LIST_PROJECT" ] && \
+        [ -z "$ALV_LIST_LARGER_THAN" ] || \
+        alv_fail "metadata filters are only valid when listing local"
+      alv_profile_load_selected "$ALV_LIST_VAULT"
+      alv_storage_open "$ALV_PROFILE_LOCATION" read
+      alv_storage_list
+      ;;
+    *) alv_fail "list requires local or cold" ;;
+  esac
 }
 
 alv_command_inspect() {
@@ -392,82 +439,144 @@ alv_command_inspect() {
     "$ALV_CODEX_SOURCE_HOME"
 }
 
-alv_command_put() {
-  [ "$#" -gt 0 ] || alv_fail "put requires a chat"
-  ALV_PUT_CHAT=$1
+alv_command_offload() {
+  [ "$#" -gt 0 ] || alv_fail "offload requires a thread"
+  ALV_OFFLOAD_CHAT=$1
   shift
 
-  ALV_PUT_LOCATION=
-  ALV_PUT_CODEX_HOME=
+  ALV_OFFLOAD_VAULT=
+  ALV_OFFLOAD_CODEX_HOME=
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --to)
-        [ "$#" -ge 2 ] || alv_fail "--to requires a storage location"
-        [ -z "$ALV_PUT_LOCATION" ] || alv_fail "--to was provided more than once"
-        ALV_PUT_LOCATION=$2
+      --vault)
+        [ "$#" -ge 2 ] || alv_fail "--vault requires a name"
+        [ -z "$ALV_OFFLOAD_VAULT" ] || \
+          alv_fail "--vault was provided more than once"
+        ALV_OFFLOAD_VAULT=$2
         shift 2
         ;;
       --codex-home)
         [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
-        [ -z "$ALV_PUT_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
-        ALV_PUT_CODEX_HOME=$2
+        [ -z "$ALV_OFFLOAD_CODEX_HOME" ] || \
+          alv_fail "--codex-home was provided more than once"
+        ALV_OFFLOAD_CODEX_HOME=$2
         shift 2
         ;;
-      *) alv_fail "unknown put option: $1" ;;
+      *) alv_fail "unknown offload option: $1" ;;
     esac
   done
 
-  [ -n "$ALV_PUT_LOCATION" ] || alv_fail "put requires --to <location>"
-  alv_resolve_codex_source "$ALV_PUT_CHAT" "$ALV_PUT_CODEX_HOME"
-  alv_storage_open "$ALV_PUT_LOCATION" write
+  alv_resolve_codex_source "$ALV_OFFLOAD_CHAT" "$ALV_OFFLOAD_CODEX_HOME"
+  alv_profile_load_selected "$ALV_OFFLOAD_VAULT"
+  alv_storage_open "$ALV_PROFILE_LOCATION" write
   alv_storage_assert_external_to "$ALV_CODEX_SOURCE_HOME"
-  alv_storage_put "$ALV_CODEX_SOURCE_FILE" "$ALV_CODEX_SOURCE_NAME"
 
-  printf 'stored %s at %s (%s bytes)\n' \
-    "$ALV_CODEX_SOURCE_NAME" "$ALV_STORAGE_LOCATION" "$ALV_STORAGE_SIZE"
+  ALV_OFFLOAD_HASH_BEFORE=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
+  alv_storage_has "$ALV_CODEX_SOURCE_NAME"
+  if [ "$ALV_STORAGE_PRESENT" = true ]; then
+    alv_storage_verify "$ALV_CODEX_SOURCE_NAME"
+    [ "$ALV_OFFLOAD_HASH_BEFORE" = "$ALV_STORAGE_HASH" ] || \
+      alv_fail "cold thread does not match the local archived thread"
+    ALV_OFFLOAD_REUSED=true
+  else
+    alv_storage_put "$ALV_CODEX_SOURCE_FILE" "$ALV_CODEX_SOURCE_NAME"
+    [ "$ALV_OFFLOAD_HASH_BEFORE" = "$ALV_STORAGE_HASH" ] || \
+      alv_fail "verified cold thread does not match the local archived thread"
+    ALV_OFFLOAD_REUSED=false
+  fi
+
+  ALV_OFFLOAD_HASH_AFTER=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
+  [ "$ALV_OFFLOAD_HASH_BEFORE" = "$ALV_OFFLOAD_HASH_AFTER" ] || \
+    alv_fail "local archived thread changed while it was being offloaded"
+  unlink "$ALV_CODEX_SOURCE_FILE"
+  [ ! -e "$ALV_CODEX_SOURCE_FILE" ] || \
+    alv_fail "failed to remove local archived thread"
+
+  if [ "$ALV_OFFLOAD_REUSED" = true ]; then
+    printf 'verified existing cold copy; removed local %s\n' "$ALV_CODEX_SOURCE_NAME"
+  else
+    printf 'offloaded %s to vault %s; removed local copy\n' \
+      "$ALV_CODEX_SOURCE_NAME" "$ALV_PROFILE_NAME"
+  fi
   printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
 }
 
 alv_command_verify() {
-  [ "$#" -gt 0 ] || alv_fail "verify requires a chat"
+  [ "$#" -gt 0 ] || alv_fail "verify requires a thread"
   ALV_VERIFY_NAME=$(alv_rollout_name "$1")
   shift
 
-  ALV_VERIFY_LOCATION=
+  ALV_VERIFY_VAULT=
+  ALV_VERIFY_CODEX_HOME=
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --at)
-        [ "$#" -ge 2 ] || alv_fail "--at requires a storage location"
-        [ -z "$ALV_VERIFY_LOCATION" ] || alv_fail "--at was provided more than once"
-        ALV_VERIFY_LOCATION=$2
+      --vault)
+        [ "$#" -ge 2 ] || alv_fail "--vault requires a name"
+        [ -z "$ALV_VERIFY_VAULT" ] || alv_fail "--vault was provided more than once"
+        ALV_VERIFY_VAULT=$2
+        shift 2
+        ;;
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_VERIFY_CODEX_HOME" ] || \
+          alv_fail "--codex-home was provided more than once"
+        ALV_VERIFY_CODEX_HOME=$2
         shift 2
         ;;
       *) alv_fail "unknown verify option: $1" ;;
     esac
   done
 
-  [ -n "$ALV_VERIFY_LOCATION" ] || alv_fail "verify requires --at <location>"
-  alv_storage_open "$ALV_VERIFY_LOCATION" read
+  alv_profile_load_selected "$ALV_VERIFY_VAULT"
+  alv_storage_open "$ALV_PROFILE_LOCATION" read
   alv_storage_verify "$ALV_VERIFY_NAME"
 
-  printf 'verified %s at %s (%s bytes)\n' \
-    "$ALV_VERIFY_NAME" "$ALV_STORAGE_LOCATION" "$ALV_STORAGE_SIZE"
+  ALV_VERIFY_STATE=cold-only
+  ALV_VERIFY_HOME=
+  if [ -n "$ALV_VERIFY_CODEX_HOME" ]; then
+    ALV_VERIFY_HOME=$(alv_canonical_directory "$ALV_VERIFY_CODEX_HOME")
+  else
+    ALV_VERIFY_HOME_RAW=$(alv_default_codex_home)
+    if [ -d "$ALV_VERIFY_HOME_RAW" ] && [ ! -L "$ALV_VERIFY_HOME_RAW" ]; then
+      ALV_VERIFY_HOME=$(alv_canonical_directory "$ALV_VERIFY_HOME_RAW")
+    elif [ -e "$ALV_VERIFY_HOME_RAW" ] || [ -L "$ALV_VERIFY_HOME_RAW" ]; then
+      alv_fail "Codex home is not a regular directory: $ALV_VERIFY_HOME_RAW"
+    fi
+  fi
+
+  if [ -n "$ALV_VERIFY_HOME" ]; then
+    ALV_VERIFY_ARCHIVED=$ALV_VERIFY_HOME/archived_sessions
+    [ ! -L "$ALV_VERIFY_ARCHIVED" ] || \
+      alv_fail "Codex archived_sessions path is a symbolic link"
+    ALV_VERIFY_LOCAL=$ALV_VERIFY_ARCHIVED/$ALV_VERIFY_NAME
+    if [ -e "$ALV_VERIFY_LOCAL" ] || [ -L "$ALV_VERIFY_LOCAL" ]; then
+      alv_require_regular_file "$ALV_VERIFY_LOCAL"
+      ALV_VERIFY_LOCAL_HASH=$(alv_sha256_file "$ALV_VERIFY_LOCAL")
+      [ "$ALV_VERIFY_LOCAL_HASH" = "$ALV_STORAGE_HASH" ] || \
+        alv_fail "cold thread differs from the local archived thread"
+      ALV_VERIFY_STATE=both
+    fi
+  fi
+
+  printf 'verified %s in vault %s (%s bytes, %s)\n' \
+    "$ALV_VERIFY_NAME" "$ALV_PROFILE_NAME" "$ALV_STORAGE_SIZE" "$ALV_VERIFY_STATE"
   printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
 }
 
 alv_command_restore() {
-  [ "$#" -gt 0 ] || alv_fail "restore requires a chat"
+  [ "$#" -gt 0 ] || alv_fail "restore requires a thread"
   ALV_RESTORE_NAME=$(alv_rollout_name "$1")
   shift
 
-  ALV_RESTORE_LOCATION=
+  ALV_RESTORE_VAULT=
   ALV_RESTORE_CODEX_HOME=
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --from)
-        [ "$#" -ge 2 ] || alv_fail "--from requires a storage location"
-        [ -z "$ALV_RESTORE_LOCATION" ] || alv_fail "--from was provided more than once"
-        ALV_RESTORE_LOCATION=$2
+      --vault)
+        [ "$#" -ge 2 ] || alv_fail "--vault requires a name"
+        [ -z "$ALV_RESTORE_VAULT" ] || \
+          alv_fail "--vault was provided more than once"
+        ALV_RESTORE_VAULT=$2
         shift 2
         ;;
       --codex-home)
@@ -480,8 +589,8 @@ alv_command_restore() {
     esac
   done
 
-  [ -n "$ALV_RESTORE_LOCATION" ] || alv_fail "restore requires --from <location>"
-  alv_storage_open "$ALV_RESTORE_LOCATION" read
+  alv_profile_load_selected "$ALV_RESTORE_VAULT"
+  alv_storage_open "$ALV_PROFILE_LOCATION" read
   if [ -n "$ALV_RESTORE_CODEX_HOME" ]; then
     ALV_RESTORE_TARGET_HOME=$(alv_canonical_directory "$ALV_RESTORE_CODEX_HOME")
   else
@@ -490,66 +599,172 @@ alv_command_restore() {
   alv_storage_assert_external_to "$ALV_RESTORE_TARGET_HOME"
   alv_prepare_codex_target "$ALV_RESTORE_TARGET_HOME"
   ALV_RESTORE_DESTINATION=$ALV_CODEX_TARGET_ARCHIVED/$ALV_RESTORE_NAME
-  alv_storage_get "$ALV_RESTORE_NAME" "$ALV_RESTORE_DESTINATION"
+  if [ -e "$ALV_RESTORE_DESTINATION" ] || [ -L "$ALV_RESTORE_DESTINATION" ]; then
+    alv_require_regular_file "$ALV_RESTORE_DESTINATION"
+    ALV_RESTORE_LOCAL_HASH=$(alv_sha256_file "$ALV_RESTORE_DESTINATION")
+    alv_storage_verify "$ALV_RESTORE_NAME"
+    [ "$ALV_RESTORE_LOCAL_HASH" = "$ALV_STORAGE_HASH" ] || \
+      alv_fail "refusing to overwrite a different local archived thread"
+    printf 'already restored %s; cold copy retained in vault %s\n' \
+      "$ALV_RESTORE_NAME" "$ALV_PROFILE_NAME"
+  else
+    alv_storage_get "$ALV_RESTORE_NAME" "$ALV_RESTORE_DESTINATION"
+    printf 'restored %s; cold copy retained in vault %s\n' \
+      "$ALV_RESTORE_DESTINATION" "$ALV_PROFILE_NAME"
+  fi
 
-  printf 'restored %s (%s bytes)\n' "$ALV_RESTORE_DESTINATION" "$ALV_STORAGE_SIZE"
   printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
 }
 
-alv_command_evict() {
-  [ "$#" -gt 0 ] || alv_fail "evict requires a chat"
-  ALV_EVICT_CHAT=$1
-  shift
+alv_command_vault_add() {
+  [ "$#" -ge 2 ] || alv_fail "vault add requires a provider and name"
+  ALV_VAULT_ADD_PROVIDER=$1
+  ALV_VAULT_ADD_NAME=$2
+  shift 2
 
-  ALV_EVICT_LOCATION=
-  ALV_EVICT_CODEX_HOME=
-  ALV_EVICT_CONFIRMED=false
+  ALV_VAULT_ADD_PATH=
+  ALV_VAULT_ADD_REMOTE=
+  ALV_VAULT_ADD_ACCOUNT=
+  ALV_VAULT_ADD_ACCESS=
+  ALV_VAULT_ADD_SECRET=
+  ALV_VAULT_ADD_BUCKET=
+  ALV_VAULT_ADD_ENDPOINT=
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --verified-at)
-        [ "$#" -ge 2 ] || alv_fail "--verified-at requires a storage location"
-        [ -z "$ALV_EVICT_LOCATION" ] || alv_fail "--verified-at was provided more than once"
-        ALV_EVICT_LOCATION=$2
+      --path)
+        [ "$#" -ge 2 ] || alv_fail "--path requires a directory"
+        [ -z "$ALV_VAULT_ADD_PATH" ] || alv_fail "--path was provided more than once"
+        ALV_VAULT_ADD_PATH=$2
         shift 2
         ;;
-      --codex-home)
-        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
-        [ -z "$ALV_EVICT_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
-        ALV_EVICT_CODEX_HOME=$2
+      --remote)
+        [ "$#" -ge 2 ] || alv_fail "--remote requires an rclone target"
+        [ -z "$ALV_VAULT_ADD_REMOTE" ] || alv_fail "--remote was provided more than once"
+        ALV_VAULT_ADD_REMOTE=$2
         shift 2
         ;;
-      --yes)
-        ALV_EVICT_CONFIRMED=true
-        shift
+      --account-id|--key-id)
+        [ "$#" -ge 2 ] || alv_fail "$1 requires a value"
+        [ -z "$ALV_VAULT_ADD_ACCOUNT" ] || alv_fail "account/key ID was provided more than once"
+        ALV_VAULT_ADD_ACCOUNT=$2
+        shift 2
         ;;
-      *) alv_fail "unknown evict option: $1" ;;
+      --access-key-id)
+        [ "$#" -ge 2 ] || alv_fail "--access-key-id requires a value"
+        [ -z "$ALV_VAULT_ADD_ACCESS" ] || \
+          alv_fail "--access-key-id was provided more than once"
+        ALV_VAULT_ADD_ACCESS=$2
+        shift 2
+        ;;
+      --secret-access-key|--application-key)
+        [ "$#" -ge 2 ] || alv_fail "$1 requires a value"
+        [ -z "$ALV_VAULT_ADD_SECRET" ] || alv_fail "provider secret was provided more than once"
+        ALV_VAULT_ADD_SECRET=$2
+        shift 2
+        ;;
+      --bucket)
+        [ "$#" -ge 2 ] || alv_fail "--bucket requires a name"
+        [ -z "$ALV_VAULT_ADD_BUCKET" ] || alv_fail "--bucket was provided more than once"
+        ALV_VAULT_ADD_BUCKET=$2
+        shift 2
+        ;;
+      --endpoint)
+        [ "$#" -ge 2 ] || alv_fail "--endpoint requires a URL"
+        [ -z "$ALV_VAULT_ADD_ENDPOINT" ] || \
+          alv_fail "--endpoint was provided more than once"
+        ALV_VAULT_ADD_ENDPOINT=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown vault add option: $1" ;;
     esac
   done
 
-  [ -n "$ALV_EVICT_LOCATION" ] || \
-    alv_fail "evict requires --verified-at <location>"
-  [ "$ALV_EVICT_CONFIRMED" = true ] || \
-    alv_fail "evict permanently removes the Codex copy; rerun with --yes"
+  case "$ALV_VAULT_ADD_PROVIDER" in
+    local)
+      [ -n "$ALV_VAULT_ADD_PATH" ] || alv_fail "local vault requires --path"
+      [ -z "$ALV_VAULT_ADD_REMOTE$ALV_VAULT_ADD_ACCOUNT$ALV_VAULT_ADD_ACCESS$ALV_VAULT_ADD_SECRET$ALV_VAULT_ADD_BUCKET$ALV_VAULT_ADD_ENDPOINT" ] || \
+        alv_fail "local vault accepts only --path"
+      alv_vault_add_local "$ALV_VAULT_ADD_NAME" "$ALV_VAULT_ADD_PATH"
+      ;;
+    r2)
+      [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE" ] || \
+        alv_fail "R2 vault does not accept --path or --remote"
+      alv_vault_add_r2 \
+        "$ALV_VAULT_ADD_NAME" \
+        "$ALV_VAULT_ADD_ACCOUNT" \
+        "$ALV_VAULT_ADD_ACCESS" \
+        "$ALV_VAULT_ADD_SECRET" \
+        "$ALV_VAULT_ADD_BUCKET" \
+        "$ALV_VAULT_ADD_ENDPOINT"
+      ;;
+    b2)
+      [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE$ALV_VAULT_ADD_ACCESS" ] || \
+        alv_fail "B2 vault does not accept --path, --remote, or --access-key-id"
+      alv_vault_add_b2 \
+        "$ALV_VAULT_ADD_NAME" \
+        "$ALV_VAULT_ADD_ACCOUNT" \
+        "$ALV_VAULT_ADD_SECRET" \
+        "$ALV_VAULT_ADD_BUCKET" \
+        "$ALV_VAULT_ADD_ENDPOINT"
+      ;;
+    drive)
+      [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_REMOTE$ALV_VAULT_ADD_ACCOUNT$ALV_VAULT_ADD_ACCESS$ALV_VAULT_ADD_SECRET$ALV_VAULT_ADD_BUCKET$ALV_VAULT_ADD_ENDPOINT" ] || \
+        alv_fail "Drive vault does not accept provider options"
+      alv_vault_add_drive "$ALV_VAULT_ADD_NAME"
+      ;;
+    rclone)
+      [ -n "$ALV_VAULT_ADD_REMOTE" ] || alv_fail "rclone vault requires --remote"
+      [ -z "$ALV_VAULT_ADD_PATH$ALV_VAULT_ADD_ACCOUNT$ALV_VAULT_ADD_ACCESS$ALV_VAULT_ADD_SECRET$ALV_VAULT_ADD_BUCKET$ALV_VAULT_ADD_ENDPOINT" ] || \
+        alv_fail "rclone vault accepts only --remote"
+      alv_vault_add_rclone "$ALV_VAULT_ADD_NAME" "$ALV_VAULT_ADD_REMOTE"
+      ;;
+    *) alv_fail "unsupported vault provider: $ALV_VAULT_ADD_PROVIDER" ;;
+  esac
 
-  alv_resolve_codex_source "$ALV_EVICT_CHAT" "$ALV_EVICT_CODEX_HOME"
-  alv_storage_open "$ALV_EVICT_LOCATION" read
-  alv_storage_assert_external_to "$ALV_CODEX_SOURCE_HOME"
+  printf 'configured encrypted %s vault %s\n' \
+    "$ALV_VAULT_ADD_PROVIDER" "$ALV_VAULT_ADD_NAME"
+}
 
-  ALV_EVICT_HASH_BEFORE=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
-  alv_storage_verify "$ALV_CODEX_SOURCE_NAME"
-  [ "$ALV_EVICT_HASH_BEFORE" = "$ALV_STORAGE_HASH" ] || \
-    alv_fail "stored chat does not match the Codex copy"
-  ALV_EVICT_HASH_AFTER=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
-  [ "$ALV_EVICT_HASH_BEFORE" = "$ALV_EVICT_HASH_AFTER" ] || \
-    alv_fail "Codex chat changed while it was being verified"
+alv_command_vault() {
+  [ "$#" -gt 0 ] || alv_fail "vault requires add, list, use, or recovery"
+  ALV_VAULT_COMMAND=$1
+  shift
 
-  unlink "$ALV_CODEX_SOURCE_FILE"
-  [ ! -e "$ALV_CODEX_SOURCE_FILE" ] || \
-    alv_fail "failed to remove Codex chat: $ALV_CODEX_SOURCE_FILE"
-
-  printf 'evicted %s from %s\n' "$ALV_CODEX_SOURCE_NAME" "$ALV_CODEX_SOURCE_HOME"
-  printf 'verified at %s\n' "$ALV_STORAGE_LOCATION"
-  printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
+  case "$ALV_VAULT_COMMAND" in
+    add) alv_command_vault_add "$@" ;;
+    list)
+      [ "$#" -eq 0 ] || alv_fail "vault list accepts no options"
+      alv_profile_list
+      ;;
+    use)
+      [ "$#" -eq 1 ] || alv_fail "vault use requires one name"
+      alv_profile_use "$1"
+      printf 'default vault is now %s\n' "$1"
+      ;;
+    recovery)
+      [ "$#" -gt 0 ] || alv_fail "vault recovery requires a name"
+      ALV_VAULT_RECOVERY_NAME=$1
+      shift
+      ALV_VAULT_RECOVERY_OUTPUT=
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --output)
+            [ "$#" -ge 2 ] || alv_fail "--output requires a file"
+            [ -z "$ALV_VAULT_RECOVERY_OUTPUT" ] || \
+              alv_fail "--output was provided more than once"
+            ALV_VAULT_RECOVERY_OUTPUT=$2
+            shift 2
+            ;;
+          *) alv_fail "unknown vault recovery option: $1" ;;
+        esac
+      done
+      [ -n "$ALV_VAULT_RECOVERY_OUTPUT" ] || \
+        alv_fail "vault recovery requires --output <file>"
+      alv_vault_export_recovery \
+        "$ALV_VAULT_RECOVERY_NAME" "$ALV_VAULT_RECOVERY_OUTPUT"
+      ;;
+    *) alv_fail "unknown vault command: $ALV_VAULT_COMMAND" ;;
+  esac
 }
 
 [ "$#" -gt 0 ] || {
@@ -562,11 +777,11 @@ shift
 
 case "$ALV_COMMAND" in
   list) alv_command_list "$@" ;;
-  inspect) alv_command_inspect "$@" ;;
-  put) alv_command_put "$@" ;;
-  verify) alv_command_verify "$@" ;;
+  offload) alv_command_offload "$@" ;;
   restore) alv_command_restore "$@" ;;
-  evict) alv_command_evict "$@" ;;
+  verify) alv_command_verify "$@" ;;
+  inspect) alv_command_inspect "$@" ;;
+  vault) alv_command_vault "$@" ;;
   help|-h|--help) alv_usage ;;
   *)
     alv_usage >&2

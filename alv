@@ -1,0 +1,28 @@
+#!/bin/sh
+
+set -eu
+
+ALV_INVOKED_AS=${0##*/}
+ALV_LAUNCHER_PATH=$0
+case "$ALV_LAUNCHER_PATH" in
+  */*) ;;
+  *) ALV_LAUNCHER_PATH=$(command -v "$ALV_LAUNCHER_PATH") || {
+    printf 'alv: cannot locate launcher\n' >&2
+    exit 1
+  } ;;
+esac
+while [ -L "$ALV_LAUNCHER_PATH" ]; do
+  ALV_LINK_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || exit 1
+  ALV_LINK_TARGET=$(readlink "$ALV_LAUNCHER_PATH") || exit 1
+  case "$ALV_LINK_TARGET" in
+    /*) ALV_LAUNCHER_PATH=$ALV_LINK_TARGET ;;
+    *) ALV_LAUNCHER_PATH=$ALV_LINK_DIRECTORY/$ALV_LINK_TARGET ;;
+  esac
+done
+ALV_LAUNCHER_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_LAUNCHER_PATH")" 2>/dev/null && pwd -P) || {
+  printf 'alv: cannot locate agent-log-vault executable\n' >&2
+  exit 1
+}
+export ALV_INVOKED_AS
+
+exec "$ALV_LAUNCHER_DIRECTORY/agent-log-vault" "$@"

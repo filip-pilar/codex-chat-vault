@@ -89,6 +89,14 @@ alv_rclone_storage_open() {
       grep -Eq '^directory_name_encryption[[:space:]]*=[[:space:]]*false[[:space:]]*$'; then
     alv_fail "rclone crypt remote must encrypt directory names"
   fi
+  if printf '%s\n' "$ALV_RCLONE_STORAGE_REDACTED" | \
+      grep -Eq '^no_data_encryption[[:space:]]*=[[:space:]]*true[[:space:]]*$'; then
+    alv_fail "rclone crypt remote must encrypt file contents"
+  fi
+  ALV_RCLONE_STORAGE_BACKING=$(printf '%s\n' "$ALV_RCLONE_STORAGE_REDACTED" |
+    sed -n 's/^[[:space:]]*remote[[:space:]]*=[[:space:]]*//p' | sed -n '1p')
+  [ -n "$ALV_RCLONE_STORAGE_BACKING" ] || \
+    alv_fail "rclone crypt remote has no backing target"
   ALV_RCLONE_STORAGE_REDACTED=
 
   if [ -n "$ALV_RCLONE_STORAGE_ROOT" ]; then
@@ -307,8 +315,34 @@ alv_rclone_storage_list() {
     done
 }
 
+alv_rclone_storage_has() {
+  ALV_RCLONE_HAS_NAME=$(alv_rollout_name "$1")
+  alv_rclone_storage_refresh_listing
+  ALV_STORAGE_PRESENT=false
+  if alv_rclone_storage_listing_has "$ALV_RCLONE_HAS_NAME" && \
+     alv_rclone_storage_listing_has "$ALV_RCLONE_HAS_NAME.sha256"; then
+    ALV_STORAGE_PRESENT=true
+  fi
+}
+
 alv_rclone_storage_assert_external_to() {
-  # rclone owns the underlying remote path. The adapter can validate that the
-  # selected remote is encrypted, but it cannot resolve provider paths locally.
-  : "$1"
+  ALV_RCLONE_EXTERNAL_CODEX_HOME=$(alv_canonical_directory "$1")
+  case "$ALV_RCLONE_STORAGE_BACKING" in
+    /*)
+      [ -d "$ALV_RCLONE_STORAGE_BACKING" ] || \
+        alv_fail "local vault backing directory does not exist"
+      ALV_RCLONE_EXTERNAL_BACKING=$(alv_canonical_directory \
+        "$ALV_RCLONE_STORAGE_BACKING")
+      case "$ALV_RCLONE_EXTERNAL_BACKING" in
+        "$ALV_RCLONE_EXTERNAL_CODEX_HOME"|"$ALV_RCLONE_EXTERNAL_CODEX_HOME"/*)
+          alv_fail "vault must be outside the Codex home"
+          ;;
+      esac
+      case "$ALV_RCLONE_EXTERNAL_CODEX_HOME" in
+        "$ALV_RCLONE_EXTERNAL_BACKING"|"$ALV_RCLONE_EXTERNAL_BACKING"/*)
+          alv_fail "vault and Codex home must not contain one another"
+          ;;
+      esac
+      ;;
+  esac
 }
