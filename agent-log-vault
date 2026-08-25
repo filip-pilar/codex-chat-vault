@@ -1,0 +1,568 @@
+#!/bin/sh
+
+set -eu
+
+umask 077
+
+ALV_PROGRAM=${0##*/}
+ALV_TEMP_DATA=
+ALV_TEMP_SUM=
+
+alv_cleanup() {
+  if command -v alv_catalog_cleanup >/dev/null 2>&1; then
+    alv_catalog_cleanup
+  fi
+}
+
+alv_fail() {
+  printf '%s: %s\n' "$ALV_PROGRAM" "$*" >&2
+  alv_cleanup
+  exit 1
+}
+
+alv_usage() {
+  cat <<EOF
+Usage:
+  $ALV_PROGRAM list codex [filters] [--codex-home <directory>]
+  $ALV_PROGRAM list <location>
+  $ALV_PROGRAM inspect <chat-or-path> [--codex-home <directory>]
+  $ALV_PROGRAM put <chat-or-path> --to <location> [--codex-home <directory>]
+  $ALV_PROGRAM verify <chat> --at <location>
+  $ALV_PROGRAM restore <chat> --from <location> [--codex-home <directory>]
+  $ALV_PROGRAM evict <chat-or-path> --verified-at <location> [--codex-home <directory>] --yes
+
+Locations:
+  file:/absolute/path    A local directory or mounted filesystem.
+
+Commands:
+  list      List completed chats in Codex or a storage location.
+  inspect   Show safe identifying metadata for one Codex archived chat.
+  put       Copy a Codex archived chat to storage and verify it.
+  verify    Verify a stored chat against its SHA-256 checksum.
+  restore   Restore a verified stored chat to Codex.
+  evict     Remove a Codex copy after a matching stored copy is verified.
+
+put and restore never remove their source and never overwrite completed files.
+
+Codex list filters:
+  --long                    Show creation time, bytes, cwd, and filename.
+  --created-before <date>   Created before YYYY-MM-DD.
+  --created-after <date>    Created after YYYY-MM-DD.
+  --project <cwd-or-name>   Exact cwd or final directory name.
+  --larger-than <size>      Size in bytes or with K, M, G, or T suffix.
+EOF
+}
+
+trap 'alv_cleanup; exit 129' HUP
+trap 'alv_cleanup; exit 130' INT
+trap 'alv_cleanup; exit 143' TERM
+
+alv_canonical_directory() {
+  [ -d "$1" ] || alv_fail "directory does not exist: $1"
+  (CDPATH= cd -P "$1" 2>/dev/null && pwd -P) || \
+    alv_fail "cannot resolve directory: $1"
+}
+
+alv_canonical_file() {
+  ALV_FILE_INPUT=$1
+  ALV_FILE_DIRECTORY=${ALV_FILE_INPUT%/*}
+  ALV_FILE_NAME=${ALV_FILE_INPUT##*/}
+
+  if [ "$ALV_FILE_DIRECTORY" = "$ALV_FILE_INPUT" ]; then
+    ALV_FILE_DIRECTORY=.
+  elif [ -z "$ALV_FILE_DIRECTORY" ]; then
+    ALV_FILE_DIRECTORY=/
+  fi
+
+  ALV_FILE_DIRECTORY=$(alv_canonical_directory "$ALV_FILE_DIRECTORY")
+  printf '%s/%s\n' "$ALV_FILE_DIRECTORY" "$ALV_FILE_NAME"
+}
+
+alv_rollout_name() {
+  ALV_ROLLOUT_PATH=$1
+  ALV_ROLLOUT_NAME=${ALV_ROLLOUT_PATH##*/}
+
+  case "$ALV_ROLLOUT_NAME" in
+    rollout-*.jsonl) ;;
+    *) alv_fail "expected a Codex rollout-*.jsonl chat: $ALV_ROLLOUT_PATH" ;;
+  esac
+
+  case "$ALV_ROLLOUT_NAME" in
+    *[!A-Za-z0-9._-]*)
+      alv_fail "chat filename contains unsupported characters: $ALV_ROLLOUT_NAME"
+      ;;
+  esac
+
+  printf '%s\n' "$ALV_ROLLOUT_NAME"
+}
+
+alv_require_regular_file() {
+  [ -f "$1" ] || alv_fail "file does not exist: $1"
+  [ ! -L "$1" ] || alv_fail "symbolic links are not accepted: $1"
+}
+
+alv_sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    alv_fail "neither shasum nor sha256sum is available"
+  fi
+}
+
+alv_file_size() {
+  if ALV_SIZE_VALUE=$(stat -f '%z' "$1" 2>/dev/null); then
+    case "$ALV_SIZE_VALUE" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$ALV_SIZE_VALUE"; return ;;
+    esac
+  fi
+
+  if ALV_SIZE_VALUE=$(stat -c '%s' "$1" 2>/dev/null); then
+    case "$ALV_SIZE_VALUE" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$ALV_SIZE_VALUE"; return ;;
+    esac
+  fi
+
+  alv_fail "could not determine file size: $1"
+}
+
+alv_copy_verified() {
+  ALV_COPY_SOURCE=$1
+  ALV_COPY_DESTINATION=$2
+
+  [ ! -e "$ALV_COPY_DESTINATION" ] || \
+    alv_fail "refusing to overwrite: $ALV_COPY_DESTINATION"
+  [ ! -L "$ALV_COPY_DESTINATION" ] || \
+    alv_fail "refusing to overwrite symbolic link: $ALV_COPY_DESTINATION"
+
+  ALV_TEMP_DATA=${ALV_COPY_DESTINATION}.partial.$$
+  [ ! -e "$ALV_TEMP_DATA" ] || \
+    alv_fail "temporary path already exists: $ALV_TEMP_DATA"
+
+  ALV_SOURCE_HASH_BEFORE=$(alv_sha256_file "$ALV_COPY_SOURCE")
+  cp "$ALV_COPY_SOURCE" "$ALV_TEMP_DATA"
+  chmod 600 "$ALV_TEMP_DATA"
+  ALV_COPIED_HASH=$(alv_sha256_file "$ALV_TEMP_DATA")
+  ALV_SOURCE_HASH_AFTER=$(alv_sha256_file "$ALV_COPY_SOURCE")
+
+  [ "$ALV_SOURCE_HASH_BEFORE" = "$ALV_SOURCE_HASH_AFTER" ] || \
+    alv_fail "source changed while it was being copied"
+  [ "$ALV_SOURCE_HASH_BEFORE" = "$ALV_COPIED_HASH" ] || \
+    alv_fail "copied bytes do not match the source"
+  [ ! -e "$ALV_COPY_DESTINATION" ] || \
+    alv_fail "destination appeared while copying: $ALV_COPY_DESTINATION"
+
+  mv "$ALV_TEMP_DATA" "$ALV_COPY_DESTINATION"
+  ALV_TEMP_DATA=
+  ALV_COPY_HASH=$ALV_COPIED_HASH
+}
+
+alv_default_codex_home() {
+  if [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s/.codex\n' "$HOME"
+  else
+    alv_fail "cannot determine Codex home; use --codex-home"
+  fi
+}
+
+alv_resolve_codex_source() {
+  ALV_SOURCE_INPUT=$1
+  ALV_SOURCE_HOME_INPUT=$2
+
+  case "$ALV_SOURCE_INPUT" in
+    */*)
+      ALV_CODEX_SOURCE_FILE=$(alv_canonical_file "$ALV_SOURCE_INPUT")
+      alv_require_regular_file "$ALV_CODEX_SOURCE_FILE"
+      ALV_CODEX_SOURCE_NAME=$(alv_rollout_name "$ALV_CODEX_SOURCE_FILE")
+      ALV_CODEX_SOURCE_DIRECTORY=${ALV_CODEX_SOURCE_FILE%/*}
+      [ "${ALV_CODEX_SOURCE_DIRECTORY##*/}" = archived_sessions ] || \
+        alv_fail "source must be directly inside a Codex archived_sessions directory"
+      ALV_CODEX_SOURCE_HOME=${ALV_CODEX_SOURCE_DIRECTORY%/*}
+
+      if [ -n "$ALV_SOURCE_HOME_INPUT" ]; then
+        ALV_EXPECTED_CODEX_HOME=$(alv_canonical_directory "$ALV_SOURCE_HOME_INPUT")
+        [ "$ALV_EXPECTED_CODEX_HOME" = "$ALV_CODEX_SOURCE_HOME" ] || \
+          alv_fail "source is not inside the requested Codex home"
+      fi
+      ;;
+    *)
+      ALV_CODEX_SOURCE_NAME=$(alv_rollout_name "$ALV_SOURCE_INPUT")
+      if [ -n "$ALV_SOURCE_HOME_INPUT" ]; then
+        ALV_SOURCE_HOME_RAW=$ALV_SOURCE_HOME_INPUT
+      else
+        ALV_SOURCE_HOME_RAW=$(alv_default_codex_home)
+      fi
+      ALV_CODEX_SOURCE_HOME=$(alv_canonical_directory "$ALV_SOURCE_HOME_RAW")
+      ALV_CODEX_SOURCE_DIRECTORY=$ALV_CODEX_SOURCE_HOME/archived_sessions
+      ALV_CODEX_SOURCE_FILE=$ALV_CODEX_SOURCE_DIRECTORY/$ALV_CODEX_SOURCE_NAME
+      alv_require_regular_file "$ALV_CODEX_SOURCE_FILE"
+      ;;
+  esac
+}
+
+alv_prepare_codex_target() {
+  ALV_TARGET_HOME_INPUT=$1
+  if [ -n "$ALV_TARGET_HOME_INPUT" ]; then
+    ALV_TARGET_HOME_RAW=$ALV_TARGET_HOME_INPUT
+  else
+    ALV_TARGET_HOME_RAW=$(alv_default_codex_home)
+  fi
+
+  ALV_CODEX_TARGET_HOME=$(alv_canonical_directory "$ALV_TARGET_HOME_RAW")
+  ALV_CODEX_TARGET_ARCHIVED=$ALV_CODEX_TARGET_HOME/archived_sessions
+  [ ! -L "$ALV_CODEX_TARGET_ARCHIVED" ] || \
+    alv_fail "target archived_sessions path is a symbolic link"
+  mkdir -p "$ALV_CODEX_TARGET_ARCHIVED"
+  ALV_CODEX_TARGET_ARCHIVED=$(alv_canonical_directory "$ALV_CODEX_TARGET_ARCHIVED")
+
+  case "$ALV_CODEX_TARGET_ARCHIVED" in
+    "$ALV_CODEX_TARGET_HOME"/*) ;;
+    *) alv_fail "target archived_sessions directory escapes the Codex home" ;;
+  esac
+}
+
+alv_list_codex() {
+  ALV_LIST_HOME_RAW=$1
+  if [ -z "$ALV_LIST_HOME_RAW" ]; then
+    ALV_LIST_HOME_RAW=$(alv_default_codex_home)
+  fi
+  ALV_LIST_HOME=$(alv_canonical_directory "$ALV_LIST_HOME_RAW")
+  ALV_LIST_ARCHIVED=$ALV_LIST_HOME/archived_sessions
+
+  [ ! -L "$ALV_LIST_ARCHIVED" ] || \
+    alv_fail "Codex archived_sessions path is a symbolic link"
+  [ -d "$ALV_LIST_ARCHIVED" ] || return 0
+
+  for ALV_LIST_FILE in "$ALV_LIST_ARCHIVED"/rollout-*.jsonl; do
+    [ -e "$ALV_LIST_FILE" ] || continue
+    alv_require_regular_file "$ALV_LIST_FILE"
+    alv_rollout_name "$ALV_LIST_FILE"
+  done
+}
+
+ALV_SCRIPT_PATH=$0
+case "$ALV_SCRIPT_PATH" in
+  */*) ;;
+  *) ALV_SCRIPT_PATH=$(command -v "$ALV_SCRIPT_PATH") || alv_fail "cannot locate executable" ;;
+esac
+while [ -L "$ALV_SCRIPT_PATH" ]; do
+  ALV_SCRIPT_LINK_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
+    alv_fail "cannot resolve executable symlink directory"
+  ALV_SCRIPT_LINK_TARGET=$(readlink "$ALV_SCRIPT_PATH") || \
+    alv_fail "cannot resolve executable symlink"
+  case "$ALV_SCRIPT_LINK_TARGET" in
+    /*) ALV_SCRIPT_PATH=$ALV_SCRIPT_LINK_TARGET ;;
+    *) ALV_SCRIPT_PATH=$ALV_SCRIPT_LINK_DIRECTORY/$ALV_SCRIPT_LINK_TARGET ;;
+  esac
+done
+ALV_SCRIPT_DIRECTORY=$(CDPATH= cd -P "$(dirname "$ALV_SCRIPT_PATH")" 2>/dev/null && pwd -P) || \
+  alv_fail "cannot locate library directory"
+ALV_LIBRARY_DIRECTORY=${AGENT_LOG_VAULT_LIB_DIR:-$ALV_SCRIPT_DIRECTORY/lib/agent-log-vault}
+
+[ -r "$ALV_LIBRARY_DIRECTORY/adapters/file.sh" ] || \
+  alv_fail "missing filesystem adapter: $ALV_LIBRARY_DIRECTORY/adapters/file.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/catalog.sh" ] || \
+  alv_fail "missing catalog support: $ALV_LIBRARY_DIRECTORY/catalog.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/storage.sh" ] || \
+  alv_fail "missing storage dispatcher: $ALV_LIBRARY_DIRECTORY/storage.sh"
+
+. "$ALV_LIBRARY_DIRECTORY/adapters/file.sh"
+. "$ALV_LIBRARY_DIRECTORY/catalog.sh"
+. "$ALV_LIBRARY_DIRECTORY/storage.sh"
+
+alv_command_list() {
+  [ "$#" -gt 0 ] || alv_fail "list requires codex or a storage location"
+  ALV_LIST_LOCATION=$1
+  shift
+
+  ALV_LIST_CODEX_HOME=
+  ALV_LIST_LONG=false
+  ALV_LIST_CREATED_BEFORE=
+  ALV_LIST_CREATED_AFTER=
+  ALV_LIST_PROJECT=
+  ALV_LIST_LARGER_THAN=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_LIST_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_LIST_CODEX_HOME=$2
+        shift 2
+        ;;
+      --long)
+        ALV_LIST_LONG=true
+        shift
+        ;;
+      --created-before)
+        [ "$#" -ge 2 ] || alv_fail "--created-before requires YYYY-MM-DD"
+        [ -z "$ALV_LIST_CREATED_BEFORE" ] || \
+          alv_fail "--created-before was provided more than once"
+        ALV_LIST_CREATED_BEFORE=$2
+        shift 2
+        ;;
+      --created-after)
+        [ "$#" -ge 2 ] || alv_fail "--created-after requires YYYY-MM-DD"
+        [ -z "$ALV_LIST_CREATED_AFTER" ] || \
+          alv_fail "--created-after was provided more than once"
+        ALV_LIST_CREATED_AFTER=$2
+        shift 2
+        ;;
+      --project)
+        [ "$#" -ge 2 ] || alv_fail "--project requires a cwd or directory name"
+        [ -z "$ALV_LIST_PROJECT" ] || alv_fail "--project was provided more than once"
+        ALV_LIST_PROJECT=$2
+        shift 2
+        ;;
+      --larger-than)
+        [ "$#" -ge 2 ] || alv_fail "--larger-than requires a size"
+        [ -z "$ALV_LIST_LARGER_THAN" ] || \
+          alv_fail "--larger-than was provided more than once"
+        ALV_LIST_LARGER_THAN=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown list option: $1" ;;
+    esac
+  done
+
+  if [ "$ALV_LIST_LOCATION" = codex ]; then
+    if [ "$ALV_LIST_LONG" = true ] || \
+       [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
+       [ -n "$ALV_LIST_CREATED_AFTER" ] || \
+       [ -n "$ALV_LIST_PROJECT" ] || \
+       [ -n "$ALV_LIST_LARGER_THAN" ]; then
+      alv_catalog_list_codex \
+        "$ALV_LIST_CODEX_HOME" \
+        "$ALV_LIST_LONG" \
+        "$ALV_LIST_CREATED_BEFORE" \
+        "$ALV_LIST_CREATED_AFTER" \
+        "$ALV_LIST_PROJECT" \
+        "$ALV_LIST_LARGER_THAN"
+    else
+      alv_list_codex "$ALV_LIST_CODEX_HOME"
+    fi
+  else
+    [ -z "$ALV_LIST_CODEX_HOME" ] || \
+      alv_fail "--codex-home is only valid when listing codex"
+    [ "$ALV_LIST_LONG" = false ] && \
+      [ -z "$ALV_LIST_CREATED_BEFORE" ] && \
+      [ -z "$ALV_LIST_CREATED_AFTER" ] && \
+      [ -z "$ALV_LIST_PROJECT" ] && \
+      [ -z "$ALV_LIST_LARGER_THAN" ] || \
+      alv_fail "metadata filters are only valid when listing codex"
+    alv_storage_open "$ALV_LIST_LOCATION" read
+    alv_storage_list
+  fi
+}
+
+alv_command_inspect() {
+  [ "$#" -gt 0 ] || alv_fail "inspect requires a chat"
+  ALV_INSPECT_CHAT=$1
+  shift
+
+  ALV_INSPECT_CODEX_HOME=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_INSPECT_CODEX_HOME" ] || \
+          alv_fail "--codex-home was provided more than once"
+        ALV_INSPECT_CODEX_HOME=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown inspect option: $1" ;;
+    esac
+  done
+
+  alv_resolve_codex_source "$ALV_INSPECT_CHAT" "$ALV_INSPECT_CODEX_HOME"
+  alv_catalog_inspect \
+    "$ALV_CODEX_SOURCE_FILE" \
+    "$ALV_CODEX_SOURCE_NAME" \
+    "$ALV_CODEX_SOURCE_HOME"
+}
+
+alv_command_put() {
+  [ "$#" -gt 0 ] || alv_fail "put requires a chat"
+  ALV_PUT_CHAT=$1
+  shift
+
+  ALV_PUT_LOCATION=
+  ALV_PUT_CODEX_HOME=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --to)
+        [ "$#" -ge 2 ] || alv_fail "--to requires a storage location"
+        [ -z "$ALV_PUT_LOCATION" ] || alv_fail "--to was provided more than once"
+        ALV_PUT_LOCATION=$2
+        shift 2
+        ;;
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_PUT_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_PUT_CODEX_HOME=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown put option: $1" ;;
+    esac
+  done
+
+  [ -n "$ALV_PUT_LOCATION" ] || alv_fail "put requires --to <location>"
+  alv_resolve_codex_source "$ALV_PUT_CHAT" "$ALV_PUT_CODEX_HOME"
+  alv_storage_open "$ALV_PUT_LOCATION" write
+  alv_storage_assert_external_to "$ALV_CODEX_SOURCE_HOME"
+  alv_storage_put "$ALV_CODEX_SOURCE_FILE" "$ALV_CODEX_SOURCE_NAME"
+
+  printf 'stored %s at %s (%s bytes)\n' \
+    "$ALV_CODEX_SOURCE_NAME" "$ALV_STORAGE_LOCATION" "$ALV_STORAGE_SIZE"
+  printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
+}
+
+alv_command_verify() {
+  [ "$#" -gt 0 ] || alv_fail "verify requires a chat"
+  ALV_VERIFY_NAME=$(alv_rollout_name "$1")
+  shift
+
+  ALV_VERIFY_LOCATION=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --at)
+        [ "$#" -ge 2 ] || alv_fail "--at requires a storage location"
+        [ -z "$ALV_VERIFY_LOCATION" ] || alv_fail "--at was provided more than once"
+        ALV_VERIFY_LOCATION=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown verify option: $1" ;;
+    esac
+  done
+
+  [ -n "$ALV_VERIFY_LOCATION" ] || alv_fail "verify requires --at <location>"
+  alv_storage_open "$ALV_VERIFY_LOCATION" read
+  alv_storage_verify "$ALV_VERIFY_NAME"
+
+  printf 'verified %s at %s (%s bytes)\n' \
+    "$ALV_VERIFY_NAME" "$ALV_STORAGE_LOCATION" "$ALV_STORAGE_SIZE"
+  printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
+}
+
+alv_command_restore() {
+  [ "$#" -gt 0 ] || alv_fail "restore requires a chat"
+  ALV_RESTORE_NAME=$(alv_rollout_name "$1")
+  shift
+
+  ALV_RESTORE_LOCATION=
+  ALV_RESTORE_CODEX_HOME=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from)
+        [ "$#" -ge 2 ] || alv_fail "--from requires a storage location"
+        [ -z "$ALV_RESTORE_LOCATION" ] || alv_fail "--from was provided more than once"
+        ALV_RESTORE_LOCATION=$2
+        shift 2
+        ;;
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_RESTORE_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_RESTORE_CODEX_HOME=$2
+        shift 2
+        ;;
+      *) alv_fail "unknown restore option: $1" ;;
+    esac
+  done
+
+  [ -n "$ALV_RESTORE_LOCATION" ] || alv_fail "restore requires --from <location>"
+  alv_storage_open "$ALV_RESTORE_LOCATION" read
+  if [ -n "$ALV_RESTORE_CODEX_HOME" ]; then
+    ALV_RESTORE_TARGET_HOME=$(alv_canonical_directory "$ALV_RESTORE_CODEX_HOME")
+  else
+    ALV_RESTORE_TARGET_HOME=$(alv_canonical_directory "$(alv_default_codex_home)")
+  fi
+  alv_storage_assert_external_to "$ALV_RESTORE_TARGET_HOME"
+  alv_prepare_codex_target "$ALV_RESTORE_TARGET_HOME"
+  ALV_RESTORE_DESTINATION=$ALV_CODEX_TARGET_ARCHIVED/$ALV_RESTORE_NAME
+  alv_storage_get "$ALV_RESTORE_NAME" "$ALV_RESTORE_DESTINATION"
+
+  printf 'restored %s (%s bytes)\n' "$ALV_RESTORE_DESTINATION" "$ALV_STORAGE_SIZE"
+  printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
+}
+
+alv_command_evict() {
+  [ "$#" -gt 0 ] || alv_fail "evict requires a chat"
+  ALV_EVICT_CHAT=$1
+  shift
+
+  ALV_EVICT_LOCATION=
+  ALV_EVICT_CODEX_HOME=
+  ALV_EVICT_CONFIRMED=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --verified-at)
+        [ "$#" -ge 2 ] || alv_fail "--verified-at requires a storage location"
+        [ -z "$ALV_EVICT_LOCATION" ] || alv_fail "--verified-at was provided more than once"
+        ALV_EVICT_LOCATION=$2
+        shift 2
+        ;;
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_EVICT_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_EVICT_CODEX_HOME=$2
+        shift 2
+        ;;
+      --yes)
+        ALV_EVICT_CONFIRMED=true
+        shift
+        ;;
+      *) alv_fail "unknown evict option: $1" ;;
+    esac
+  done
+
+  [ -n "$ALV_EVICT_LOCATION" ] || \
+    alv_fail "evict requires --verified-at <location>"
+  [ "$ALV_EVICT_CONFIRMED" = true ] || \
+    alv_fail "evict permanently removes the Codex copy; rerun with --yes"
+
+  alv_resolve_codex_source "$ALV_EVICT_CHAT" "$ALV_EVICT_CODEX_HOME"
+  alv_storage_open "$ALV_EVICT_LOCATION" read
+  alv_storage_assert_external_to "$ALV_CODEX_SOURCE_HOME"
+
+  ALV_EVICT_HASH_BEFORE=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
+  alv_storage_verify "$ALV_CODEX_SOURCE_NAME"
+  [ "$ALV_EVICT_HASH_BEFORE" = "$ALV_STORAGE_HASH" ] || \
+    alv_fail "stored chat does not match the Codex copy"
+  ALV_EVICT_HASH_AFTER=$(alv_sha256_file "$ALV_CODEX_SOURCE_FILE")
+  [ "$ALV_EVICT_HASH_BEFORE" = "$ALV_EVICT_HASH_AFTER" ] || \
+    alv_fail "Codex chat changed while it was being verified"
+
+  unlink "$ALV_CODEX_SOURCE_FILE"
+  [ ! -e "$ALV_CODEX_SOURCE_FILE" ] || \
+    alv_fail "failed to remove Codex chat: $ALV_CODEX_SOURCE_FILE"
+
+  printf 'evicted %s from %s\n' "$ALV_CODEX_SOURCE_NAME" "$ALV_CODEX_SOURCE_HOME"
+  printf 'verified at %s\n' "$ALV_STORAGE_LOCATION"
+  printf 'sha256 %s\n' "$ALV_STORAGE_HASH"
+}
+
+[ "$#" -gt 0 ] || {
+  alv_usage >&2
+  exit 2
+}
+
+ALV_COMMAND=$1
+shift
+
+case "$ALV_COMMAND" in
+  list) alv_command_list "$@" ;;
+  inspect) alv_command_inspect "$@" ;;
+  put) alv_command_put "$@" ;;
+  verify) alv_command_verify "$@" ;;
+  restore) alv_command_restore "$@" ;;
+  evict) alv_command_evict "$@" ;;
+  help|-h|--help) alv_usage ;;
+  *)
+    alv_usage >&2
+    alv_fail "unknown command: $ALV_COMMAND"
+    ;;
+esac
