@@ -64,10 +64,15 @@ case "${1:-}" in
         alv_fake_remote_file "$ALV_FAKE_NAME"
         [ ! -e "$ALV_FAKE_REMOTE_FILE" ] || exit 1
         printf 'type = %s\n' "$ALV_FAKE_TYPE" > "$ALV_FAKE_REMOTE_FILE"
+        ALV_FAKE_NO_OUTPUT=false
         shift 4
         while [ "$#" -gt 0 ]; do
           case "$1" in
-            --obscure|--no-output|--all)
+            --no-output)
+              ALV_FAKE_NO_OUTPUT=true
+              shift
+              ;;
+            --obscure|--all)
               shift
               ;;
             --*)
@@ -80,6 +85,32 @@ case "${1:-}" in
             ;;
           esac
         done
+        case "$ALV_FAKE_TYPE" in
+          dropbox)
+            printf '%s\n' \
+              'token = {"access_token":"fake-dropbox-token"}' >> \
+              "$ALV_FAKE_REMOTE_FILE"
+            ;;
+          onedrive)
+            printf '%s\n' \
+              'token = {"access_token":"fake-onedrive-token"}' \
+              'drive_id = fake-drive-id' \
+              "drive_type = ${ALV_FAKE_RCLONE_ONEDRIVE_TYPE:-personal}" >> \
+              "$ALV_FAKE_REMOTE_FILE"
+            ;;
+        esac
+        if [ "$ALV_FAKE_NO_OUTPUT" = false ]; then
+          sed -n '1,$p' "$ALV_FAKE_REMOTE_FILE"
+        fi
+        if [ "${ALV_FAKE_RCLONE_FAIL_CREATE_AFTER_WRITE:-}" = \
+             "$ALV_FAKE_NAME" ]; then
+          exit 8
+        fi
+        if [ "${ALV_FAKE_RCLONE_INTERRUPT_CREATE:-}" = \
+             "$ALV_FAKE_NAME" ]; then
+          kill -TERM "$PPID"
+          exit 143
+        fi
         ;;
       delete)
         [ "$#" -eq 3 ] || exit 2
@@ -94,6 +125,24 @@ case "${1:-}" in
         sed -E \
           -e 's/^(password2?|secret_access_key|key|token) = .*/\1 = XXX/' \
           "$ALV_FAKE_REMOTE_FILE"
+        ;;
+      dump)
+        [ "$#" -eq 2 ] || exit 2
+        command -v jq >/dev/null 2>&1 || exit 2
+        ALV_FAKE_DUMP='{}'
+        for ALV_FAKE_FILE in "$ALV_FAKE_REMOTES"/*; do
+          [ -f "$ALV_FAKE_FILE" ] || continue
+          ALV_FAKE_NAME=${ALV_FAKE_FILE##*/}
+          ALV_FAKE_CONFIG=$(jq -Rn \
+            '[inputs | capture("^(?<key>[^ ]+) = (?<value>.*)$") |
+              {(.key): .value}] | add // {}' \
+            "$ALV_FAKE_FILE") || exit 2
+          ALV_FAKE_DUMP=$(printf '%s\n' "$ALV_FAKE_DUMP" | jq \
+            --arg name "$ALV_FAKE_NAME" \
+            --argjson config "$ALV_FAKE_CONFIG" \
+            '. + {($name): $config}') || exit 2
+        done
+        printf '%s\n' "$ALV_FAKE_DUMP"
         ;;
       show)
         [ "$#" -eq 3 ] || exit 2

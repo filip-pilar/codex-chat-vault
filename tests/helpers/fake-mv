@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+[ -n "${ALV_TEST_REAL_MV:-}" ] || {
+  printf 'ALV_TEST_REAL_MV is required\n' >&2
+  exit 2
+}
+
+ALV_FAKE_MV_DESTINATION=
+for ALV_FAKE_MV_ARGUMENT in "$@"; do
+  ALV_FAKE_MV_DESTINATION=$ALV_FAKE_MV_ARGUMENT
+done
+
+case "$ALV_FAKE_MV_DESTINATION" in
+  */default-vault)
+    if [ "${ALV_FAKE_MV_INTERRUPT_DEFAULT:-}" = 1 ]; then
+      kill -TERM "$PPID"
+      exit 143
+    fi
+    ;;
+esac
+
+exec "$ALV_TEST_REAL_MV" "$@"

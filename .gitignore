@@ -1,0 +1,11 @@
+.DS_Store
+CLAUDE.local.md
+.env
+.env.*
+!.env.example
+*.jsonl
+*.log
+*.out
+*.tmp
+rclone.conf
+*-recovery.conf

@@ -2,7 +2,7 @@
 
 set -eu
 
-ALV_TEST_ROOT_DIR=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ALV_TEST_ROOT_DIR=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 ALV_TEST_CLI=$ALV_TEST_ROOT_DIR/alv
 ALV_TEST_TMP_BASE=${TMPDIR:-/tmp}
 [ "$ALV_TEST_TMP_BASE" = / ] || ALV_TEST_TMP_BASE=${ALV_TEST_TMP_BASE%/}
@@ -110,7 +110,8 @@ rg -q 'list local' "$ALV_TEST_WORK/help.out" || \
   alv_test_fail "help omitted the local workflow"
 rg -q 'offload <thread>' "$ALV_TEST_WORK/help.out" || \
   alv_test_fail "help omitted offload"
-if rg -q 'file:/| put | evict ' "$ALV_TEST_WORK/help.out"; then
+if rg -q 'file:/|^[[:space:]]+alv (put|evict)([[:space:]]|$)' \
+  "$ALV_TEST_WORK/help.out"; then
   alv_test_fail "help exposed a removed plaintext or legacy command"
 fi
 

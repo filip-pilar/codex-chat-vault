@@ -2,7 +2,7 @@
 
 set -eu
 
-ALV_TEST_ROOT_DIR=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+ALV_TEST_ROOT_DIR=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 ALV_TEST_CLI=$ALV_TEST_ROOT_DIR/alv
 ALV_TEST_REAL_RCLONE=$(command -v rclone || true)
 ALV_TEST_REAL_CP=$(command -v cp || true)
@@ -89,6 +89,7 @@ CODEX_HOME="$ALV_TEST_WORK/codex home"
 export RCLONE_CONFIG ALV_CONFIG_HOME CODEX_HOME
 
 ALV_TEST_VAULT="$ALV_TEST_WORK/encrypted vault"
+ALV_TEST_FAILED_VAULT="$ALV_TEST_WORK/failed encrypted vault"
 ALV_TEST_CLEAN_HOME="$ALV_TEST_WORK/clean codex home"
 ALV_TEST_UNSAFE_BACKING="$ALV_TEST_WORK/unsafe crypt backing"
 ALV_TEST_OTHER_HOME="$ALV_TEST_WORK/other codex home"
@@ -99,6 +100,7 @@ mkdir -p \
   "$ALV_TEST_CLEAN_HOME" \
   "$ALV_TEST_OTHER_HOME/archived_sessions" \
   "$ALV_TEST_UNSAFE_BACKING" \
+  "$ALV_TEST_FAILED_VAULT" \
   "$ALV_TEST_VAULT"
 
 ALV_TEST_ROLLOUT_A=rollout-2026-02-01T00-00-00-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl
@@ -132,6 +134,17 @@ ALV_TEST_PROFILE_LIST=$("$ALV_TEST_CLI" vault list)
 [ "$ALV_TEST_PROFILE_LIST" = '* cold	local' ] || \
   alv_test_fail "the first local vault was not saved as default"
 
+alv_test_expect_failure "failed local setup saved a profile" \
+  env ALV_TEST_RCLONE_MODE=reject-setup-probe \
+    PATH="$ALV_TEST_WRAPPER_BIN:$PATH" \
+    "$ALV_TEST_CLI" vault add local broken-local \
+      --path "$ALV_TEST_FAILED_VAULT"
+[ ! -e "$ALV_CONFIG_HOME/vaults/broken-local" ] || \
+  alv_test_fail "failed local setup left a named profile"
+if rclone listremotes | rg -Fxq 'alv-broken-local-crypt:'; then
+  alv_test_fail "failed local setup left its rclone remote"
+fi
+
 ALV_TEST_CRYPT_CONFIG=$(rclone config redacted alv-cold-crypt)
 printf '%s\n' "$ALV_TEST_CRYPT_CONFIG" | \
   rg -q '^type = crypt$' || alv_test_fail "local vault is not crypt"
@@ -144,6 +157,14 @@ printf '%s\n' "$ALV_TEST_CRYPT_CONFIG" | \
 printf '%s\n' "$ALV_TEST_CRYPT_CONFIG" | \
   rg -q '^no_data_encryption = false$' || \
   alv_test_fail "local vault does not encrypt data"
+
+alv_test_expect_failure "rclone listing failure was not reported clearly" \
+  env ALV_TEST_RCLONE_MODE=reject-list \
+    PATH="$ALV_TEST_WRAPPER_BIN:$PATH" \
+    "$ALV_TEST_CLI" list cold
+rg -Fq 'could not list rclone location: rclone:alv-cold-crypt:' \
+  "$ALV_TEST_WORK/last-command.out" || \
+  alv_test_fail "rclone listing failure omitted the vault location"
 
 [ -z "$("$ALV_TEST_CLI" list cold)" ] || \
   alv_test_fail "new cold vault was not empty"

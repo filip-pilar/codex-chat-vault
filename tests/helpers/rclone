@@ -7,7 +7,22 @@ set -eu
   exit 2
 }
 
+if [ "${1:-}" = lsf ] && \
+   [ "${ALV_TEST_RCLONE_MODE:-}" = reject-list ]; then
+  printf 'test wrapper rejected the vault listing\n' >&2
+  exit 95
+fi
+
 if [ "${1:-}" = copyto ] && [ "$#" -ge 3 ]; then
+  case "$3" in
+    *:.alv-setup-*|*:*/.alv-setup-*)
+      if [ "${ALV_TEST_RCLONE_MODE:-}" = reject-setup-probe ]; then
+        printf 'test wrapper rejected the setup probe\n' >&2
+        exit 96
+      fi
+      ;;
+  esac
+
   case "$2" in
     *:archived_sessions/rollout-*.jsonl|*:*/archived_sessions/rollout-*.jsonl)
       if [ "${ALV_TEST_RCLONE_MODE:-}" = interrupt-download ]; then
