@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+[ -n "${ALV_TEST_REAL_CP:-}" ] || {
+  printf 'ALV_TEST_REAL_CP is required\n' >&2
+  exit 2
+}
+
+ALV_TEST_CP_DESTINATION=
+for ALV_TEST_CP_ARGUMENT in "$@"; do
+  ALV_TEST_CP_DESTINATION=$ALV_TEST_CP_ARGUMENT
+done
+
+if [ "${ALV_TEST_CP_MODE:-}" = interrupt-placement ]; then
+  case "$ALV_TEST_CP_DESTINATION" in
+    */archived_sessions/rollout-*.jsonl.partial.*)
+      "$ALV_TEST_REAL_CP" "$@"
+      kill -TERM "$PPID"
+      exit 143
+      ;;
+  esac
+fi
+
+exec "$ALV_TEST_REAL_CP" "$@"

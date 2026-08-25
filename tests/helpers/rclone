@@ -1,0 +1,36 @@
+#!/bin/sh
+
+set -eu
+
+[ -n "${ALV_TEST_REAL_RCLONE:-}" ] || {
+  printf 'ALV_TEST_REAL_RCLONE is required\n' >&2
+  exit 2
+}
+
+if [ "${1:-}" = copyto ] && [ "$#" -ge 3 ]; then
+  case "$2" in
+    *:archived_sessions/rollout-*.jsonl|*:*/archived_sessions/rollout-*.jsonl)
+      if [ "${ALV_TEST_RCLONE_MODE:-}" = interrupt-download ]; then
+        kill -TERM "$PPID"
+        exit 143
+      fi
+      ;;
+  esac
+
+  case "$2" in
+    */archived_sessions/rollout-*.jsonl)
+      case "${ALV_TEST_RCLONE_MODE:-}" in
+        reject-upload)
+          printf 'test wrapper rejected an unexpected upload\n' >&2
+          exit 97
+          ;;
+        interrupt-upload)
+          kill -TERM "$PPID"
+          exit 143
+          ;;
+      esac
+      ;;
+  esac
+fi
+
+exec "$ALV_TEST_REAL_RCLONE" "$@"
