@@ -24,12 +24,14 @@ The transfer engine supports a Codex endpoint and storage locations:
 
 - The Codex endpoint finds and restores chats in `archived_sessions`.
 - `file:` stores chats in a local directory or mounted volume.
+- `rclone:` stores chats through an existing encrypted rclone remote.
 - Cloud adapters make providers such as Cloudflare R2, Backblaze B2, and Google
   Drive easy to configure and use.
 
 Storage backends provide the same basic operations: put, get, list, and verify.
-The filesystem backend is built into the CLI. Cloud adapters may use rclone for
-provider access while keeping credentials and provider details out of the core.
+The filesystem and encrypted rclone backends are built into the CLI. Provider
+helpers may configure rclone while keeping credentials and provider details out
+of the core.
 
 ## Transfers
 

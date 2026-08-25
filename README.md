@@ -3,11 +3,12 @@
 `agent-log-vault` is a CLI for storing old Codex archived chats outside
 Codex-managed storage and restoring them later without changing their bytes.
 
-The current storage adapter accepts an absolute local directory or mounted
-filesystem:
+Storage locations can be an absolute local directory or an existing encrypted
+rclone remote:
 
 ```text
 file:/absolute/path
+rclone:<crypt-remote>:<optional/root>
 ```
 
 ## Commands
@@ -71,6 +72,19 @@ mkdir -m 700 /Volumes/MyVault/agent-log-vault
   --from file:/Volumes/MyVault/agent-log-vault
 ```
 
+The same commands work with a configured rclone crypt remote:
+
+```sh
+./agent-log-vault put rollout-EXAMPLE.jsonl \
+  --to 'rclone:my-vault-crypt:agent-log-vault'
+
+./agent-log-vault verify rollout-EXAMPLE.jsonl \
+  --at 'rclone:my-vault-crypt:agent-log-vault'
+
+./agent-log-vault restore rollout-EXAMPLE.jsonl \
+  --from 'rclone:my-vault-crypt:agent-log-vault'
+```
+
 `put` copies and verifies but does not remove the Codex source. `evict` is the
 only destructive command: it verifies that the stored bytes match the Codex
 copy immediately before removing that copy. `restore` leaves the stored copy
@@ -91,11 +105,29 @@ use a destination whose access and encryption you trust.
 
 The CLI core calls the storage dispatcher in `lib/agent-log-vault/storage.sh`.
 The filesystem implementation is in
-`lib/agent-log-vault/adapters/file.sh`. Keep the executable and `lib` directory
-together when running the CLI.
+`lib/agent-log-vault/adapters/file.sh`. The encrypted rclone implementation is
+in `lib/agent-log-vault/adapters/rclone.sh`. Keep the executable and `lib`
+directory together when running the CLI.
 
-Run the synthetic test suite with:
+The rclone adapter requires an existing remote whose rclone type is `crypt`,
+with standard filename encryption and directory-name encryption enabled. The
+CLI does not create the remote or read, store, or print its credentials and
+encryption passwords. Back up the rclone configuration and crypt passwords:
+without them, encrypted filenames and contents cannot be recovered.
+
+Remote verification downloads and decrypts the complete chat and checksum,
+then computes SHA-256 locally. This works without provider-specific checksum
+support, but it consumes download time and any egress charged by the provider.
+An interrupted upload without its checksum is omitted from `list`; retrying
+`put` completes it only when its bytes exactly match the selected Codex chat.
+
+Run the filesystem and encrypted-rclone synthetic test suites with:
 
 ```sh
 ./tests/test.sh
+./tests/test-rclone.sh
 ```
+
+The rclone test uses only a disposable local crypt remote and a temporary
+rclone configuration. It does not access the normal rclone config, a cloud
+provider, or the real Codex home.
