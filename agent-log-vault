@@ -9,6 +9,9 @@ ALV_TEMP_DATA=
 ALV_TEMP_SUM=
 
 alv_cleanup() {
+  if command -v alv_rclone_storage_cleanup >/dev/null 2>&1; then
+    alv_rclone_storage_cleanup
+  fi
   if command -v alv_catalog_cleanup >/dev/null 2>&1; then
     alv_catalog_cleanup
   fi
@@ -32,7 +35,8 @@ Usage:
   $ALV_PROGRAM evict <chat-or-path> --verified-at <location> [--codex-home <directory>] --yes
 
 Locations:
-  file:/absolute/path    A local directory or mounted filesystem.
+  file:/absolute/path                 A local directory or mounted filesystem.
+  rclone:<crypt-remote>:<root>        An encrypted, configured rclone remote.
 
 Commands:
   list      List completed chats in Codex or a storage location.
@@ -266,12 +270,15 @@ ALV_LIBRARY_DIRECTORY=${AGENT_LOG_VAULT_LIB_DIR:-$ALV_SCRIPT_DIRECTORY/lib/agent
 
 [ -r "$ALV_LIBRARY_DIRECTORY/adapters/file.sh" ] || \
   alv_fail "missing filesystem adapter: $ALV_LIBRARY_DIRECTORY/adapters/file.sh"
+[ -r "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh" ] || \
+  alv_fail "missing rclone adapter: $ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/catalog.sh" ] || \
   alv_fail "missing catalog support: $ALV_LIBRARY_DIRECTORY/catalog.sh"
 [ -r "$ALV_LIBRARY_DIRECTORY/storage.sh" ] || \
   alv_fail "missing storage dispatcher: $ALV_LIBRARY_DIRECTORY/storage.sh"
 
 . "$ALV_LIBRARY_DIRECTORY/adapters/file.sh"
+. "$ALV_LIBRARY_DIRECTORY/adapters/rclone.sh"
 . "$ALV_LIBRARY_DIRECTORY/catalog.sh"
 . "$ALV_LIBRARY_DIRECTORY/storage.sh"
 
