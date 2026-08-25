@@ -138,8 +138,16 @@ ALV_TEST_FILTERED=$("$ALV_TEST_CLI" list local \
 [ "$ALV_TEST_FILTERED" = "$ALV_TEST_ROLLOUT_B" ] || \
   alv_test_fail "project selected the wrong thread"
 
-ALV_TEST_SOURCE_A_SIZE=$(stat -f '%z' "$ALV_TEST_SOURCE_A" 2>/dev/null || \
-  stat -c '%s' "$ALV_TEST_SOURCE_A")
+ALV_TEST_SOURCE_A_SIZE=
+if ALV_TEST_STAT_SIZE=$(stat -f '%z' "$ALV_TEST_SOURCE_A" 2>/dev/null); then
+  case "$ALV_TEST_STAT_SIZE" in
+    ''|*[!0-9]*) ;;
+    *) ALV_TEST_SOURCE_A_SIZE=$ALV_TEST_STAT_SIZE ;;
+  esac
+fi
+if [ -z "$ALV_TEST_SOURCE_A_SIZE" ]; then
+  ALV_TEST_SOURCE_A_SIZE=$(stat -c '%s' "$ALV_TEST_SOURCE_A")
+fi
 ALV_TEST_FILTERED=$("$ALV_TEST_CLI" list local \
   --larger-than "$ALV_TEST_SOURCE_A_SIZE" \
   --codex-home "$ALV_TEST_CODEX_HOME")
