@@ -48,13 +48,14 @@ SHA-256 sidecar. The sidecar is written last and marks the transfer complete.
 
 A named vault profile points to an rclone `crypt` remote. Rclone is the single
 storage and transfer engine for local folders, Cloudflare R2, Backblaze B2,
-Google Drive, and advanced user-configured targets.
+Dropbox, OneDrive Personal, and advanced user-configured targets.
 
 ```text
 alv vault add local <name> --path <path>
 alv vault add r2 <name>
 alv vault add b2 <name>
-alv vault add drive <name>
+alv vault add dropbox <name>
+alv vault add onedrive <name>
 alv vault add rclone <name> --remote <existing-target>
 ```
 
@@ -63,6 +64,10 @@ layer with content and filename encryption, perform a disposable upload and
 read-back check, and save the profile only after validation succeeds. The first
 vault becomes the default; `alv vault use <name>` changes it.
 
+The OneDrive helper is Personal-only. Google Drive, OneDrive Business, and
+SharePoint remain available through a manually configured rclone target and
+`vault add rclone`.
+
 Profiles contain only the vault name, provider, and crypt remote. Recovery
-export writes the selected rclone configuration and reconstruction instructions
-to a user-chosen private file.
+export writes the selected rclone configuration to a user-chosen private file
+and prints reconstruction instructions.

@@ -8,13 +8,29 @@ Codex archived_sessions <-> encrypted cold vault
 ```
 
 Cold storage always uses rclone `crypt`, whether its backing storage is a
-folder, mounted drive, Cloudflare R2, Backblaze B2, or Google Drive.
+folder, mounted drive, Cloudflare R2, Backblaze B2, Dropbox, OneDrive Personal,
+or another rclone target.
+
+## Use with an agent
+
+Repository-aware agents should read `AGENTS.md` before acting. Claude Code uses
+the `CLAUDE.md` bridge to load the same instructions. A useful starting request
+is: “Read `AGENTS.md`, inspect my setup read-only, explain the exact proposed
+actions, and ask before changing real Codex or cloud state.”
+
+An agent may safely begin with `./alv --help`, `./alv vault list`, and
+`./alv list local`. A general request to use the repository should not be
+treated as permission to offload or restore histories.
 
 ## Setup
 
+There is no build or installation step. Run `./alv` from the cloned repository
+and keep the launcher, main executable, and `lib/agent-log-vault/` together.
+
 The CLI requires `rclone` and either `shasum` or `sha256sum`. Creating a vault
 also requires `openssl`. `jq` enables filtered listings, inspection, and
-recovery export.
+recovery export. When available, `sqlite3` adds Codex's stored title, archive
+time, and Git branch to inspection output.
 
 Create a local encrypted vault in an existing directory:
 
@@ -24,14 +40,23 @@ mkdir -p /absolute/path/to/cold-vault
 ```
 
 Or configure a cloud vault. R2 expects bucket-scoped Object Read & Write
-credentials; B2 expects a Read and Write application key for an existing
-bucket. Drive hands browser authorization to rclone.
+credentials. B2 expects a bucket-scoped Read and Write application key for the
+existing bucket. Dropbox and OneDrive hand browser authorization to rclone.
 
 ```sh
 ./alv vault add r2 cold
 ./alv vault add b2 cold
-./alv vault add drive cold
+./alv vault add dropbox cold
+./alv vault add onedrive cold
 ```
+
+Run R2 and B2 setup without secret flags when possible and answer the private
+prompts yourself. `./alv --help` documents every non-interactive option, but
+command-line secrets can be exposed through shell history or agent logs.
+
+The OneDrive helper accepts Personal accounts only. Configure OneDrive
+Business, SharePoint, or Google Drive directly in rclone, then use the advanced
+command below.
 
 Advanced users can wrap any existing rclone target. If the target is already a
 secure `crypt` remote, it is used directly.
@@ -44,6 +69,11 @@ Setup creates the encryption configuration in rclone, performs a disposable
 upload/read-back check, and saves the named vault only if validation succeeds.
 The first vault is the default. Use `./alv vault list`,
 `./alv vault use <name>`, or `--vault <name>` when more than one is configured.
+
+ALV profiles default to `${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-vault` and
+contain no credentials. `ALV_CONFIG_HOME` overrides that location. Codex data
+defaults to `${CODEX_HOME:-$HOME/.codex}`; rclone owns provider credentials and
+encryption secrets.
 
 ## Everyday use
 
@@ -87,6 +117,10 @@ non-default Codex homes.
 Quit Codex Desktop and any Codex CLI process before offloading or restoring so
 the archive is stable during the operation.
 
+Offload uploads and reads back the full JSONL. Verify and restore also download
+the full JSONL, so large threads require corresponding network transfer and
+temporary free space.
+
 Rclone owns provider credentials, OAuth tokens, and encryption secrets. Back up
 the recovery export securely; it is sensitive and is required to decrypt the
 vault on another machine.
@@ -101,12 +135,18 @@ rclone target, then pass the printed encrypted target to
 
 ## Validation
 
+The test suite also requires `rg` (ripgrep). It runs ShellCheck when available;
+CI requires it.
+
 ```sh
-./tests/test.sh
-./tests/test-rclone.sh
-./tests/test-providers.sh
+./tests/run.sh
 ```
 
 The tests use disposable Codex homes, local storage, rclone configurations, and
 provider mocks. They do not access the normal rclone configuration, cloud
-accounts, or the real `~/.codex`.
+accounts, browser OAuth, or the real `~/.codex`.
+
+Separately approved macOS live tests have passed for local storage, Cloudflare
+R2, Backblaze B2, and Dropbox, including encrypted offload, read-back
+verification, restoration, and exact-byte comparison. OneDrive Personal has
+only isolated mock coverage so far.
