@@ -135,8 +135,7 @@ rclone target, then pass the printed encrypted target to
 
 ## Validation
 
-The test suite also requires `rg` (ripgrep). It runs ShellCheck when available;
-CI requires it.
+The test suite also requires `rg` (ripgrep). It runs ShellCheck when available.
 
 ```sh
 ./tests/run.sh

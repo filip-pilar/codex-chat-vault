@@ -86,7 +86,7 @@ configuration or `~/.codex`.
 ## Changing the repository
 
 - Preserve POSIX `/bin/sh` compatibility and `set -eu`; do not introduce Bash
-  syntax. Keep macOS and Linux behavior aligned.
+  syntax. macOS is the currently supported and tested platform.
 - Preserve private permissions, cleanup traps, symlink rejection, normalized
   path checks, immutable transfers, and atomic placement.
 - Treat filenames, paths, provider values, and JSONL data as hostile input.
@@ -107,9 +107,9 @@ Run the complete isolated validation from the repository root:
 ```
 
 The suite requires `rclone`, `jq`, `rg`, `openssl`, and either `shasum` or
-`sha256sum`. It runs ShellCheck when installed; CI installs and requires it. The
-suite must not access cloud accounts, browser OAuth, the normal rclone
-configuration, or the real `~/.codex`.
+`sha256sum`. It runs ShellCheck when installed. The suite must not access cloud
+accounts, browser OAuth, the normal rclone configuration, or the real
+`~/.codex`.
 
 Current separately approved macOS live validation has passed for local
 storage, Cloudflare R2, Backblaze B2, and Dropbox. OneDrive Personal has only
