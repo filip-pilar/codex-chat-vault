@@ -28,9 +28,9 @@ There is no build or installation step. Run `./alv` from the cloned repository
 and keep the launcher, main executable, and `lib/agent-log-vault/` together.
 
 The CLI requires `rclone` and either `shasum` or `sha256sum`. Creating a vault
-also requires `openssl`. `jq` enables filtered listings, inspection, and
-recovery export. When available, `sqlite3` adds Codex's stored title, archive
-time, and Git branch to inspection output.
+also requires `openssl`. `jq` enables enriched listings, stats, planning,
+inspection, and recovery export. When available, `sqlite3` adds Codex's stored
+title, archive time, and Git branch to inspection output.
 
 Create a local encrypted vault in an existing directory:
 
@@ -80,6 +80,8 @@ encryption secrets.
 ```sh
 ./alv list local
 ./alv list cold
+./alv stats local --top 10 --by-project
+./alv plan offload --created-before 2026-01-01 --vault cold
 ./alv offload rollout-EXAMPLE.jsonl
 ./alv restore rollout-EXAMPLE.jsonl
 ./alv verify rollout-EXAMPLE.jsonl
@@ -97,7 +99,21 @@ Restore retains the cold copy. Offloading a restored chat verifies the existing
 cold bytes and removes the local copy without uploading it again.
 
 `list local` accepts `--long`, `--created-before YYYY-MM-DD`, `--created-after
-YYYY-MM-DD`, `--project <cwd-or-name>`, and `--larger-than <bytes-or-K/M/G/T>`.
+YYYY-MM-DD`, `--project <cwd-or-name>`, `--larger-than <bytes-or-K/M/G/T>`,
+`--sort name|created|size`, `--limit <count>`, and `--json`. Size sorting is
+largest first; creation sorting is newest first.
+
+`stats local` reports task count, logical and on-disk bytes, available disk
+space, oldest/newest and largest tasks, and age buckets. Add `--top <count>`,
+`--by-project`, or `--json` for detail.
+
+`plan offload` accepts the same filters, sorting, limit, and JSON options as
+the enriched local listing, plus `--vault`. It is strictly read-only: it shows
+the selected bytes, expected reclaim, required uploads, existing complete cold
+pairs, and incomplete-object conflicts. A listed cold pair is reported as
+unverified; actual offload still reads it back and verifies its hash before
+removing anything local.
+
 `inspect <thread>` shows identifying metadata. `CODEX_HOME` and
 `--codex-home <directory>` are supported for disposable environments and
 non-default Codex homes.

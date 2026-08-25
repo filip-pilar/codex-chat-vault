@@ -12,6 +12,8 @@ The everyday workflow is:
 ```text
 alv list local
 alv list cold
+alv stats local
+alv plan offload [filters]
 alv offload <thread>
 alv restore <thread>
 alv verify <thread>
@@ -27,6 +29,12 @@ both       --offload--> cold only
 
 `restore` retains the cold copy. If a matching cold copy already exists,
 `offload` verifies it and removes only the local copy without uploading again.
+
+`stats local` summarizes archive size, age, projects, and largest tasks.
+Enriched local listings support filters, sorting, limits, and JSON.
+`plan offload` previews selection, reclaimable bytes, uploads, existing cold
+pairs, and conflicts without changing either side. Cold presence in a plan is
+never presented as content verification.
 
 ## Safety
 

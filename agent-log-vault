@@ -39,6 +39,8 @@ alv_usage() {
 Usage:
   $ALV_PROGRAM list local [filters] [--codex-home <directory>]
   $ALV_PROGRAM list cold [--vault <name>]
+  $ALV_PROGRAM stats local [--top <count>] [--by-project] [--json]
+  $ALV_PROGRAM plan offload [filters] [--vault <name>] [--json]
   $ALV_PROGRAM offload <thread> [--vault <name>] [--codex-home <directory>]
   $ALV_PROGRAM restore <thread> [--vault <name>] [--codex-home <directory>]
   $ALV_PROGRAM verify <thread> [--vault <name>] [--codex-home <directory>]
@@ -55,6 +57,8 @@ Usage:
 
 Commands:
   list      List chats in local Codex archives or the encrypted cold vault.
+  stats     Summarize local archive size, age, projects, and largest chats.
+  plan      Preview an offload selection and its cold-vault state; changes nothing.
   offload   Verify a cold copy, then remove the local archived copy.
   restore   Restore a verified cold copy while retaining it in the vault.
   verify    Read back and verify the encrypted cold copy.
@@ -64,12 +68,20 @@ Commands:
 The first added vault is the default. Use --vault to select another vault for
 one command. Cold storage is always an rclone crypt remote.
 
-Local list filters:
-  --long                    Show creation time, bytes, cwd, and filename.
+Local selection options:
+  --long                    Show list metadata (list local only).
   --created-before <date>   Created before YYYY-MM-DD.
   --created-after <date>    Created after YYYY-MM-DD.
   --project <cwd-or-name>   Exact cwd or final directory name.
   --larger-than <size>      Size in bytes or with K, M, G, or T suffix.
+  --sort <name|created|size> Sort by name, newest creation, or largest size.
+  --limit <count>           Return only the first count after sorting.
+  --json                    Emit structured JSON.
+
+Stats options:
+  --top <count>             Include the largest count chats.
+  --by-project              Include totals grouped by project directory.
+  --json                    Emit structured JSON.
 
 Provider setup options:
   r2  --account-id <id> --access-key-id <id> --secret-access-key <key>
@@ -341,6 +353,10 @@ alv_command_list() {
   ALV_LIST_CREATED_AFTER=
   ALV_LIST_PROJECT=
   ALV_LIST_LARGER_THAN=
+  ALV_LIST_SORT=name
+  ALV_LIST_SORT_SEEN=false
+  ALV_LIST_LIMIT=
+  ALV_LIST_JSON=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --codex-home)
@@ -386,6 +402,24 @@ alv_command_list() {
         ALV_LIST_LARGER_THAN=$2
         shift 2
         ;;
+      --sort)
+        [ "$#" -ge 2 ] || alv_fail "--sort requires name, created, or size"
+        [ "$ALV_LIST_SORT_SEEN" = false ] || alv_fail "--sort was provided more than once"
+        ALV_LIST_SORT=$2
+        ALV_LIST_SORT_SEEN=true
+        shift 2
+        ;;
+      --limit)
+        [ "$#" -ge 2 ] || alv_fail "--limit requires a count"
+        [ -z "$ALV_LIST_LIMIT" ] || alv_fail "--limit was provided more than once"
+        ALV_LIST_LIMIT=$2
+        shift 2
+        ;;
+      --json)
+        [ "$ALV_LIST_JSON" = false ] || alv_fail "--json was provided more than once"
+        ALV_LIST_JSON=true
+        shift
+        ;;
       *) alv_fail "unknown list option: $1" ;;
     esac
   done
@@ -394,18 +428,27 @@ alv_command_list() {
     local)
       [ -z "$ALV_LIST_VAULT" ] || \
         alv_fail "--vault is only valid when listing cold"
+      if [ "$ALV_LIST_LONG" = true ] && [ "$ALV_LIST_JSON" = true ]; then
+        alv_fail "--long and --json cannot be used together"
+      fi
       if [ "$ALV_LIST_LONG" = true ] || \
          [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
          [ -n "$ALV_LIST_CREATED_AFTER" ] || \
          [ -n "$ALV_LIST_PROJECT" ] || \
-         [ -n "$ALV_LIST_LARGER_THAN" ]; then
+         [ -n "$ALV_LIST_LARGER_THAN" ] || \
+         [ "$ALV_LIST_SORT" != name ] || \
+         [ -n "$ALV_LIST_LIMIT" ] || \
+         [ "$ALV_LIST_JSON" = true ]; then
         alv_catalog_list_codex \
           "$ALV_LIST_CODEX_HOME" \
           "$ALV_LIST_LONG" \
           "$ALV_LIST_CREATED_BEFORE" \
           "$ALV_LIST_CREATED_AFTER" \
           "$ALV_LIST_PROJECT" \
-          "$ALV_LIST_LARGER_THAN"
+          "$ALV_LIST_LARGER_THAN" \
+          "$ALV_LIST_SORT" \
+          "$ALV_LIST_LIMIT" \
+          "$ALV_LIST_JSON"
       else
         alv_list_codex "$ALV_LIST_CODEX_HOME"
       fi
@@ -417,7 +460,10 @@ alv_command_list() {
          [ -n "$ALV_LIST_CREATED_BEFORE" ] || \
          [ -n "$ALV_LIST_CREATED_AFTER" ] || \
          [ -n "$ALV_LIST_PROJECT" ] || \
-         [ -n "$ALV_LIST_LARGER_THAN" ]; then
+         [ -n "$ALV_LIST_LARGER_THAN" ] || \
+         [ "$ALV_LIST_SORT" != name ] || \
+         [ -n "$ALV_LIST_LIMIT" ] || \
+         [ "$ALV_LIST_JSON" = true ]; then
         alv_fail "metadata filters are only valid when listing local"
       fi
       alv_profile_load_selected "$ALV_LIST_VAULT"
@@ -426,6 +472,189 @@ alv_command_list() {
       ;;
     *) alv_fail "list requires local or cold" ;;
   esac
+}
+
+alv_command_stats() {
+  [ "$#" -gt 0 ] || alv_fail "stats requires local"
+  ALV_STATS_SIDE=$1
+  shift
+  [ "$ALV_STATS_SIDE" = local ] || alv_fail "stats currently supports only local"
+
+  ALV_STATS_CODEX_HOME=
+  ALV_STATS_TOP=
+  ALV_STATS_BY_PROJECT=false
+  ALV_STATS_JSON=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_STATS_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_STATS_CODEX_HOME=$2
+        shift 2
+        ;;
+      --top)
+        [ "$#" -ge 2 ] || alv_fail "--top requires a count"
+        [ -z "$ALV_STATS_TOP" ] || alv_fail "--top was provided more than once"
+        ALV_STATS_TOP=$2
+        shift 2
+        ;;
+      --by-project)
+        [ "$ALV_STATS_BY_PROJECT" = false ] || alv_fail "--by-project was provided more than once"
+        ALV_STATS_BY_PROJECT=true
+        shift
+        ;;
+      --json)
+        [ "$ALV_STATS_JSON" = false ] || alv_fail "--json was provided more than once"
+        ALV_STATS_JSON=true
+        shift
+        ;;
+      *) alv_fail "unknown stats option: $1" ;;
+    esac
+  done
+
+  alv_catalog_stats_codex \
+    "$ALV_STATS_CODEX_HOME" "$ALV_STATS_TOP" \
+    "$ALV_STATS_BY_PROJECT" "$ALV_STATS_JSON"
+}
+
+alv_command_plan() {
+  [ "$#" -gt 0 ] || alv_fail "plan requires offload"
+  ALV_PLAN_ACTION=$1
+  shift
+  [ "$ALV_PLAN_ACTION" = offload ] || alv_fail "plan currently supports only offload"
+
+  ALV_PLAN_CODEX_HOME=
+  ALV_PLAN_VAULT=
+  ALV_PLAN_BEFORE=
+  ALV_PLAN_AFTER=
+  ALV_PLAN_PROJECT=
+  ALV_PLAN_LARGER=
+  ALV_PLAN_SORT=name
+  ALV_PLAN_SORT_SEEN=false
+  ALV_PLAN_LIMIT=
+  ALV_PLAN_JSON=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex-home)
+        [ "$#" -ge 2 ] || alv_fail "--codex-home requires a directory"
+        [ -z "$ALV_PLAN_CODEX_HOME" ] || alv_fail "--codex-home was provided more than once"
+        ALV_PLAN_CODEX_HOME=$2
+        shift 2
+        ;;
+      --vault)
+        [ "$#" -ge 2 ] || alv_fail "--vault requires a name"
+        [ -z "$ALV_PLAN_VAULT" ] || alv_fail "--vault was provided more than once"
+        ALV_PLAN_VAULT=$2
+        shift 2
+        ;;
+      --created-before)
+        [ "$#" -ge 2 ] || alv_fail "--created-before requires YYYY-MM-DD"
+        [ -z "$ALV_PLAN_BEFORE" ] || alv_fail "--created-before was provided more than once"
+        ALV_PLAN_BEFORE=$2
+        shift 2
+        ;;
+      --created-after)
+        [ "$#" -ge 2 ] || alv_fail "--created-after requires YYYY-MM-DD"
+        [ -z "$ALV_PLAN_AFTER" ] || alv_fail "--created-after was provided more than once"
+        ALV_PLAN_AFTER=$2
+        shift 2
+        ;;
+      --project)
+        [ "$#" -ge 2 ] || alv_fail "--project requires a cwd or directory name"
+        [ -z "$ALV_PLAN_PROJECT" ] || alv_fail "--project was provided more than once"
+        ALV_PLAN_PROJECT=$2
+        shift 2
+        ;;
+      --larger-than)
+        [ "$#" -ge 2 ] || alv_fail "--larger-than requires a size"
+        [ -z "$ALV_PLAN_LARGER" ] || alv_fail "--larger-than was provided more than once"
+        ALV_PLAN_LARGER=$2
+        shift 2
+        ;;
+      --sort)
+        [ "$#" -ge 2 ] || alv_fail "--sort requires name, created, or size"
+        [ "$ALV_PLAN_SORT_SEEN" = false ] || alv_fail "--sort was provided more than once"
+        ALV_PLAN_SORT=$2
+        ALV_PLAN_SORT_SEEN=true
+        shift 2
+        ;;
+      --limit)
+        [ "$#" -ge 2 ] || alv_fail "--limit requires a count"
+        [ -z "$ALV_PLAN_LIMIT" ] || alv_fail "--limit was provided more than once"
+        ALV_PLAN_LIMIT=$2
+        shift 2
+        ;;
+      --json)
+        [ "$ALV_PLAN_JSON" = false ] || alv_fail "--json was provided more than once"
+        ALV_PLAN_JSON=true
+        shift
+        ;;
+      *) alv_fail "unknown plan option: $1" ;;
+    esac
+  done
+
+  alv_catalog_collect \
+    "$ALV_PLAN_CODEX_HOME" "$ALV_PLAN_BEFORE" "$ALV_PLAN_AFTER" \
+    "$ALV_PLAN_PROJECT" "$ALV_PLAN_LARGER" "$ALV_PLAN_SORT" \
+    "$ALV_PLAN_LIMIT"
+  alv_profile_load_selected "$ALV_PLAN_VAULT"
+  alv_storage_open "$ALV_PROFILE_LOCATION"
+  alv_storage_assert_external_to "$ALV_CATALOG_CODEX_HOME"
+  ALV_PLAN_INVENTORY=$ALV_CATALOG_TEMP_DIRECTORY/cold-inventory
+  alv_storage_inventory > "$ALV_PLAN_INVENTORY"
+  ALV_PLAN_RESULT=$ALV_CATALOG_TEMP_DIRECTORY/plan.json
+
+  jq \
+    --arg vault "$ALV_PROFILE_NAME" \
+    --rawfile inventory_text "$ALV_PLAN_INVENTORY" '
+      ($inventory_text | split("\n") | map(select(length > 0))) as $inventory |
+      map(. as $candidate |
+        ($inventory | index($candidate.name) != null) as $has_data |
+        ($inventory | index($candidate.name + ".sha256") != null) as $has_sum |
+        $candidate +
+          if $has_data and $has_sum then
+            {status: "cold_present_unverified", action: "verify_then_remove"}
+          elif ($has_data | not) and ($has_sum | not) then
+            {status: "upload_required", action: "upload_verify_then_remove"}
+          elif $has_data then
+            {status: "conflict_incomplete_data", action: "blocked"}
+          else
+            {status: "conflict_orphan_checksum", action: "blocked"}
+          end
+      ) as $candidates |
+      {
+        action: "offload",
+        vault: $vault,
+        selected_threads: ($candidates | length),
+        selected_bytes: (($candidates | map(.bytes) | add) // 0),
+        expected_reclaim_bytes: (($candidates | map(select(.action != "blocked") | .bytes) | add) // 0),
+        upload_required_threads: ($candidates | map(select(.status == "upload_required")) | length),
+        upload_required_bytes: (($candidates | map(select(.status == "upload_required") | .bytes) | add) // 0),
+        cold_present_threads: ($candidates | map(select(.status == "cold_present_unverified")) | length),
+        conflict_threads: ($candidates | map(select(.action == "blocked")) | length),
+        note: "Cold presence is not content verification; offload still reads back and verifies bytes before local removal.",
+        candidates: $candidates
+      }
+    ' "$ALV_CATALOG_RESULTS" > "$ALV_PLAN_RESULT"
+
+  if [ "$ALV_PLAN_JSON" = true ]; then
+    jq -c '.' "$ALV_PLAN_RESULT"
+  else
+    jq -r '
+      "vault\t\(.vault)",
+      "selected_threads\t\(.selected_threads)",
+      "selected_bytes\t\(.selected_bytes)",
+      "expected_reclaim_bytes\t\(.expected_reclaim_bytes)",
+      "upload_required_threads\t\(.upload_required_threads)",
+      "upload_required_bytes\t\(.upload_required_bytes)",
+      "cold_present_threads\t\(.cold_present_threads)",
+      "conflict_threads\t\(.conflict_threads)",
+      "note\t\(.note)",
+      "STATUS\tACTION\tBYTES\tCREATED\tPROJECT\tCHAT",
+      (.candidates[] | [.status, .action, (.bytes | tostring), .created, .project, .name] | @tsv)
+    ' "$ALV_PLAN_RESULT"
+  fi
+  alv_catalog_cleanup
 }
 
 alv_command_inspect() {
@@ -816,6 +1045,8 @@ shift
 
 case "$ALV_COMMAND" in
   list) alv_command_list "$@" ;;
+  stats) alv_command_stats "$@" ;;
+  plan) alv_command_plan "$@" ;;
   offload) alv_command_offload "$@" ;;
   restore) alv_command_restore "$@" ;;
   verify) alv_command_verify "$@" ;;

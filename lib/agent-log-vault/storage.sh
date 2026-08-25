@@ -28,6 +28,10 @@ alv_storage_list() {
   alv_rclone_storage_list
 }
 
+alv_storage_inventory() {
+  alv_rclone_storage_inventory
+}
+
 alv_storage_has() {
   alv_rclone_storage_has "$1"
 }

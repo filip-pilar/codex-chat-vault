@@ -316,6 +316,21 @@ alv_rclone_storage_list() {
     done
 }
 
+alv_rclone_storage_inventory() {
+  alv_rclone_storage_refresh_listing
+  printf '%s\n' "$ALV_RCLONE_STORAGE_LISTING" |
+    while IFS= read -r ALV_RCLONE_INVENTORY_NAME; do
+      case "$ALV_RCLONE_INVENTORY_NAME" in
+        rollout-*.jsonl|rollout-*.jsonl.sha256)
+          case "$ALV_RCLONE_INVENTORY_NAME" in
+            *[!A-Za-z0-9._-]*) continue ;;
+          esac
+          printf '%s\n' "$ALV_RCLONE_INVENTORY_NAME"
+          ;;
+      esac
+    done
+}
+
 alv_rclone_storage_has() {
   ALV_RCLONE_HAS_NAME=$(alv_rollout_name "$1")
   alv_rclone_storage_refresh_listing

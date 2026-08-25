@@ -17,7 +17,8 @@ Treat the user's Codex history, rclone configuration, cloud accounts, and
 recovery exports as sensitive external state.
 
 - Read-only discovery commands are `./alv list local`, `./alv list cold`,
-  `./alv inspect <thread>`, `./alv verify <thread>`, and `./alv vault list`.
+  `./alv stats local`, `./alv plan offload`, `./alv inspect <thread>`,
+  `./alv verify <thread>`, and `./alv vault list`.
 - Do not run `vault add`, `vault use`, `vault recovery`, `offload`, or `restore`
   against real user state without authorization for the exact action and
   target. A general request to “use this repo” authorizes discovery, not
@@ -73,7 +74,8 @@ configuration or `~/.codex`.
 
 - `agent-log-vault`: CLI parsing, shared safety helpers, and command workflows.
 - `alv`: symlink-aware short launcher.
-- `lib/agent-log-vault/catalog.sh`: read-only Codex archive discovery.
+- `lib/agent-log-vault/catalog.sh`: read-only discovery, stats, and planning
+  selection.
 - `lib/agent-log-vault/profiles.sh`: named vault profiles without secrets.
 - `lib/agent-log-vault/storage.sh`: small storage boundary.
 - `lib/agent-log-vault/rclone-storage.sh`: encrypted storage implementation.

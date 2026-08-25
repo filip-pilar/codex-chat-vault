@@ -223,6 +223,19 @@ cmp -s "$ALV_TEST_SOURCE_A" "$ALV_TEST_WORK/expected-a.jsonl" || \
 rg -q 'both' "$ALV_TEST_WORK/verify-a-both.out" || \
   alv_test_fail "verify did not report the both state"
 
+ALV_TEST_PLAN_JSON=$("$ALV_TEST_CLI" plan offload --json --vault cold)
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r '.selected_threads')" = 3 ] || \
+  alv_test_fail "offload plan counted the wrong local threads"
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r '.cold_present_threads')" = 1 ] || \
+  alv_test_fail "offload plan missed the existing cold copy"
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r '.upload_required_threads')" = 2 ] || \
+  alv_test_fail "offload plan counted upload candidates incorrectly"
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r --arg name "$ALV_TEST_ROLLOUT_A" '.candidates[] | select(.name == $name) | .status')" = cold_present_unverified ] || \
+  alv_test_fail "offload plan overstated cold verification"
+[ -f "$ALV_TEST_SOURCE_A" ] && [ -f "$ALV_TEST_SOURCE_B" ] && \
+  [ -f "$ALV_TEST_SOURCE_C" ] || \
+  alv_test_fail "read-only offload plan changed a local source"
+
 ALV_TEST_RCLONE_MODE=reject-upload PATH="$ALV_TEST_WRAPPER_BIN:$PATH" \
   "$ALV_TEST_CLI" offload "$ALV_TEST_ROLLOUT_A" \
   > "$ALV_TEST_WORK/repeat-offload-a.out"
@@ -275,6 +288,14 @@ rclone copyto \
 if "$ALV_TEST_CLI" list cold | grep -Fqx "$ALV_TEST_ROLLOUT_C"; then
   alv_test_fail "data without a checksum appeared complete"
 fi
+ALV_TEST_PLAN_JSON=$("$ALV_TEST_CLI" plan offload \
+  --json --project rclone-test --vault cold)
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r --arg name "$ALV_TEST_ROLLOUT_C" '.candidates[] | select(.name == $name) | .status')" = conflict_incomplete_data ] || \
+  alv_test_fail "offload plan missed an incomplete cold object"
+[ "$(printf '%s\n' "$ALV_TEST_PLAN_JSON" | jq -r '.conflict_threads')" -ge 1 ] || \
+  alv_test_fail "offload plan omitted its conflict count"
+[ -f "$ALV_TEST_SOURCE_C" ] || \
+  alv_test_fail "conflict planning changed the local source"
 "$ALV_TEST_CLI" offload "$ALV_TEST_ROLLOUT_C" \
   > "$ALV_TEST_WORK/resume-offload-c.out"
 [ ! -e "$ALV_TEST_SOURCE_C" ] || \
@@ -330,6 +351,10 @@ done
 for ALV_TEST_TEMP in "$ALV_TEST_RUNTIME_TMP"/agent-log-vault-setup.*; do
   [ ! -e "$ALV_TEST_TEMP" ] || \
     alv_test_fail "vault setup left a temporary directory"
+done
+for ALV_TEST_TEMP in "$ALV_TEST_RUNTIME_TMP"/agent-log-vault-catalog.*; do
+  [ ! -e "$ALV_TEST_TEMP" ] || \
+    alv_test_fail "planning left a private temporary directory"
 done
 
 printf 'all encrypted vault tests passed\n'

@@ -110,6 +110,10 @@ rg -q 'list local' "$ALV_TEST_WORK/help.out" || \
   alv_test_fail "help omitted the local workflow"
 rg -q 'offload <thread>' "$ALV_TEST_WORK/help.out" || \
   alv_test_fail "help omitted offload"
+rg -q 'stats local' "$ALV_TEST_WORK/help.out" || \
+  alv_test_fail "help omitted local stats"
+rg -q 'plan offload' "$ALV_TEST_WORK/help.out" || \
+  alv_test_fail "help omitted offload planning"
 if rg -q 'file:/|^[[:space:]]+alv (put|evict)([[:space:]]|$)' \
   "$ALV_TEST_WORK/help.out"; then
   alv_test_fail "help exposed a removed plaintext or legacy command"
@@ -138,6 +142,23 @@ ALV_TEST_FILTERED=$("$ALV_TEST_CLI" list local \
 [ "$ALV_TEST_FILTERED" = "$ALV_TEST_ROLLOUT_B" ] || \
   alv_test_fail "project selected the wrong thread"
 
+ALV_TEST_SORTED=$("$ALV_TEST_CLI" list local \
+  --sort size --limit 1 --codex-home "$ALV_TEST_CODEX_HOME")
+[ "$ALV_TEST_SORTED" = "$ALV_TEST_ROLLOUT_B" ] || \
+  alv_test_fail "size sorting and limiting selected the wrong thread"
+ALV_TEST_SORTED=$("$ALV_TEST_CLI" list local \
+  --sort created --codex-home "$ALV_TEST_CODEX_HOME")
+[ "$(printf '%s\n' "$ALV_TEST_SORTED" | sed -n '1p')" = "$ALV_TEST_ROLLOUT_B" ] || \
+  alv_test_fail "created sorting did not return the newest thread first"
+ALV_TEST_LIST_JSON=$("$ALV_TEST_CLI" list local \
+  --json --project 'project alpha' --codex-home "$ALV_TEST_CODEX_HOME")
+[ "$(printf '%s\n' "$ALV_TEST_LIST_JSON" | jq -r 'length')" = 1 ] || \
+  alv_test_fail "JSON listing returned the wrong number of threads"
+[ "$(printf '%s\n' "$ALV_TEST_LIST_JSON" | jq -r '.[0].name')" = "$ALV_TEST_ROLLOUT_A" ] || \
+  alv_test_fail "JSON listing returned the wrong thread"
+[ "$(printf '%s\n' "$ALV_TEST_LIST_JSON" | jq -r '.[0].project')" = 'project alpha' ] || \
+  alv_test_fail "JSON listing omitted the project"
+
 ALV_TEST_SOURCE_A_SIZE=
 if ALV_TEST_STAT_SIZE=$(stat -f '%z' "$ALV_TEST_SOURCE_A" 2>/dev/null); then
   case "$ALV_TEST_STAT_SIZE" in
@@ -154,12 +175,39 @@ ALV_TEST_FILTERED=$("$ALV_TEST_CLI" list local \
 [ "$ALV_TEST_FILTERED" = "$ALV_TEST_ROLLOUT_B" ] || \
   alv_test_fail "larger-than selected the wrong thread"
 
+ALV_TEST_STATS_JSON=$("$ALV_TEST_CLI" stats local \
+  --top 1 --by-project --json --codex-home "$ALV_TEST_CODEX_HOME")
+[ "$(printf '%s\n' "$ALV_TEST_STATS_JSON" | jq -r '.threads')" = 2 ] || \
+  alv_test_fail "stats counted the wrong number of threads"
+[ "$(printf '%s\n' "$ALV_TEST_STATS_JSON" | jq -r '.top[0].name')" = "$ALV_TEST_ROLLOUT_B" ] || \
+  alv_test_fail "stats selected the wrong largest thread"
+[ "$(printf '%s\n' "$ALV_TEST_STATS_JSON" | jq -r '.projects | length')" = 2 ] || \
+  alv_test_fail "stats returned the wrong project groups"
+[ "$(printf '%s\n' "$ALV_TEST_STATS_JSON" | jq -r '.logical_bytes > 0 and .on_disk_bytes > 0 and .available_bytes > 0')" = true ] || \
+  alv_test_fail "stats omitted size or disk-space totals"
+"$ALV_TEST_CLI" stats local --top 1 --codex-home "$ALV_TEST_CODEX_HOME" \
+  > "$ALV_TEST_WORK/stats.out"
+rg -q '^threads[[:space:]]+2$' "$ALV_TEST_WORK/stats.out" || \
+  alv_test_fail "text stats omitted the thread count"
+
 alv_test_expect_failure "invalid discovery date was accepted" \
   "$ALV_TEST_CLI" list local --created-before 2026-13-01 \
     --codex-home "$ALV_TEST_CODEX_HOME"
+alv_test_expect_failure "invalid list sort was accepted" \
+  "$ALV_TEST_CLI" list local --sort random --codex-home "$ALV_TEST_CODEX_HOME"
+alv_test_expect_failure "zero list limit was accepted" \
+  "$ALV_TEST_CLI" list local --limit 0 --codex-home "$ALV_TEST_CODEX_HOME"
+alv_test_expect_failure "duplicate list sort was accepted" \
+  "$ALV_TEST_CLI" list local --sort name --sort size \
+    --codex-home "$ALV_TEST_CODEX_HOME"
+alv_test_expect_failure "zero stats top count was accepted" \
+  "$ALV_TEST_CLI" stats local --top 0 --codex-home "$ALV_TEST_CODEX_HOME"
 alv_test_expect_failure "cold listing worked without a configured vault" \
   env ALV_CONFIG_HOME="$ALV_TEST_WORK/empty-config" \
     "$ALV_TEST_CLI" list cold
+alv_test_expect_failure "offload plan worked without a configured vault" \
+  env ALV_CONFIG_HOME="$ALV_TEST_WORK/empty-config" \
+    "$ALV_TEST_CLI" plan offload --codex-home "$ALV_TEST_CODEX_HOME"
 alv_test_expect_failure "legacy plaintext location was accepted" \
   "$ALV_TEST_CLI" list "file:$ALV_TEST_WORK/vault"
 alv_test_expect_failure "active thread path was accepted for inspection" \
@@ -169,5 +217,10 @@ ALV_TEST_INVALID_ROLLOUT=$ALV_TEST_INVALID_HOME/archived_sessions/rollout-2026-0
 printf '%s\n' '{"type":"not-session-meta"}' > "$ALV_TEST_INVALID_ROLLOUT"
 alv_test_expect_failure "invalid first metadata record was accepted" \
   "$ALV_TEST_CLI" list local --long --codex-home "$ALV_TEST_INVALID_HOME"
+
+for ALV_TEST_TEMP in "$ALV_TEST_RUNTIME_TMP"/agent-log-vault-catalog.*; do
+  [ ! -e "$ALV_TEST_TEMP" ] || \
+    alv_test_fail "catalog command left a private temporary directory"
+done
 
 printf 'all discovery tests passed\n'
