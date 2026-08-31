@@ -34,6 +34,24 @@ alv_test_expect_failure() {
   fi
 }
 
+alv_test_inode() {
+  if ALV_TEST_INODE_VALUE=$(stat -f '%i' "$1" 2>/dev/null); then
+    printf '%s\n' "$ALV_TEST_INODE_VALUE"
+  else
+    stat -c '%i' "$1"
+  fi
+}
+
+alv_test_sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    alv_test_fail "neither shasum nor sha256sum is available"
+  fi
+}
+
 alv_test_write_rollout() {
   ALV_TEST_WRITE_PATH=$1
   ALV_TEST_WRITE_ID=$2
@@ -212,6 +230,37 @@ alv_test_expect_failure "legacy plaintext location was accepted" \
   "$ALV_TEST_CLI" list "file:$ALV_TEST_WORK/vault"
 alv_test_expect_failure "active thread path was accepted for inspection" \
   "$ALV_TEST_CLI" inspect "$ALV_TEST_ACTIVE_SOURCE"
+
+ALV_TEST_SYMLINK_HOME="$ALV_TEST_WORK/symlink codex home"
+ALV_TEST_EXTERNAL_ARCHIVE="$ALV_TEST_WORK/external synthetic archive"
+ALV_TEST_SYMLINK_ROLLOUT=rollout-2026-01-06T03-04-05-44444444-4444-4444-4444-444444444444.jsonl
+ALV_TEST_EXTERNAL_SOURCE=$ALV_TEST_EXTERNAL_ARCHIVE/$ALV_TEST_SYMLINK_ROLLOUT
+mkdir -p "$ALV_TEST_SYMLINK_HOME" "$ALV_TEST_EXTERNAL_ARCHIVE"
+alv_test_write_rollout \
+  "$ALV_TEST_EXTERNAL_SOURCE" \
+  44444444-4444-4444-4444-444444444444 \
+  2026-01-06T03:04:05.000Z \
+  '/workspace/external synthetic' \
+  25
+ln -s "$ALV_TEST_EXTERNAL_ARCHIVE" \
+  "$ALV_TEST_SYMLINK_HOME/archived_sessions"
+ALV_TEST_EXTERNAL_INODE=$(alv_test_inode "$ALV_TEST_EXTERNAL_SOURCE")
+ALV_TEST_EXTERNAL_HASH=$(alv_test_sha256_file "$ALV_TEST_EXTERNAL_SOURCE")
+alv_test_expect_failure "bare-name inspect followed a symlinked archived_sessions" \
+  "$ALV_TEST_CLI" inspect "$ALV_TEST_SYMLINK_ROLLOUT" \
+    --codex-home "$ALV_TEST_SYMLINK_HOME"
+rg -Fq 'Codex archived_sessions path is a symbolic link' \
+  "$ALV_TEST_WORK/last-command.out" || \
+  alv_test_fail "bare-name inspect omitted the symlink-boundary diagnostic"
+[ -L "$ALV_TEST_SYMLINK_HOME/archived_sessions" ] && \
+  [ "$(readlink "$ALV_TEST_SYMLINK_HOME/archived_sessions")" = \
+    "$ALV_TEST_EXTERNAL_ARCHIVE" ] || \
+  alv_test_fail "bare-name inspect changed the archived_sessions symlink"
+[ "$ALV_TEST_EXTERNAL_INODE" = \
+  "$(alv_test_inode "$ALV_TEST_EXTERNAL_SOURCE")" ] && \
+  [ "$ALV_TEST_EXTERNAL_HASH" = \
+  "$(alv_test_sha256_file "$ALV_TEST_EXTERNAL_SOURCE")" ] || \
+  alv_test_fail "bare-name inspect changed the external synthetic rollout"
 
 ALV_TEST_INVALID_ROLLOUT=$ALV_TEST_INVALID_HOME/archived_sessions/rollout-2026-01-05T03-04-05-33333333-3333-3333-3333-333333333333.jsonl
 printf '%s\n' '{"type":"not-session-meta"}' > "$ALV_TEST_INVALID_ROLLOUT"

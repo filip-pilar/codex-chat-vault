@@ -7,24 +7,29 @@ set -eu
 umask 077
 
 ALV_PROGRAM=${ALV_INVOKED_AS:-${0##*/}}
-ALV_TEMP_DATA=
+ALV_LOCAL_PUBLICATION_DESTINATION=
+ALV_LOCAL_PUBLICATION_STAGE=
 
 alv_cleanup() {
-  if [ -n "${ALV_TEMP_DATA:-}" ] && [ -e "$ALV_TEMP_DATA" ]; then
-    unlink "$ALV_TEMP_DATA" 2>/dev/null || true
-    ALV_TEMP_DATA=
+  if [ -n "${ALV_LOCAL_PUBLICATION_STAGE:-}" ]; then
+    if [ -e "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+       [ -L "$ALV_LOCAL_PUBLICATION_STAGE" ]; then
+      unlink "$ALV_LOCAL_PUBLICATION_STAGE" 2>/dev/null || true
+    fi
   fi
+  ALV_LOCAL_PUBLICATION_STAGE=
+  ALV_LOCAL_PUBLICATION_DESTINATION=
   if command -v alv_vault_setup_cleanup >/dev/null 2>&1; then
-    alv_vault_setup_cleanup
+    alv_vault_setup_cleanup || true
   fi
   if command -v alv_profiles_cleanup >/dev/null 2>&1; then
-    alv_profiles_cleanup
+    alv_profiles_cleanup || true
   fi
   if command -v alv_rclone_storage_cleanup >/dev/null 2>&1; then
-    alv_rclone_storage_cleanup
+    alv_rclone_storage_cleanup || true
   fi
   if command -v alv_catalog_cleanup >/dev/null 2>&1; then
-    alv_catalog_cleanup
+    alv_catalog_cleanup || true
   fi
 }
 
@@ -183,34 +188,145 @@ alv_file_size() {
   alv_fail "could not determine file size: $1"
 }
 
+alv_file_mode() {
+  if ALV_MODE_VALUE=$(stat -f '%Lp' "$1" 2>/dev/null); then
+    case "$ALV_MODE_VALUE" in
+      ''|*[!0-7]*) ;;
+      *) printf '%s\n' "$ALV_MODE_VALUE"; return ;;
+    esac
+  fi
+
+  if ALV_MODE_VALUE=$(stat -c '%a' "$1" 2>/dev/null); then
+    case "$ALV_MODE_VALUE" in
+      ''|*[!0-7]*) ;;
+      *) printf '%s\n' "$ALV_MODE_VALUE"; return ;;
+    esac
+  fi
+
+  alv_fail "could not determine file permissions: $1"
+}
+
+alv_local_publication_prepare() {
+  ALV_LOCAL_PUBLICATION_INPUT=$1
+
+  [ -z "${ALV_LOCAL_PUBLICATION_STAGE:-}" ] || \
+    alv_fail "a local publication stage is already active"
+  if [ -e "$ALV_LOCAL_PUBLICATION_INPUT" ] || \
+     [ -L "$ALV_LOCAL_PUBLICATION_INPUT" ]; then
+    alv_fail "refusing to overwrite: $ALV_LOCAL_PUBLICATION_INPUT"
+  fi
+
+  ALV_LOCAL_PUBLICATION_DIRECTORY=${ALV_LOCAL_PUBLICATION_INPUT%/*}
+  ALV_LOCAL_PUBLICATION_NAME=${ALV_LOCAL_PUBLICATION_INPUT##*/}
+  if [ "$ALV_LOCAL_PUBLICATION_DIRECTORY" = \
+       "$ALV_LOCAL_PUBLICATION_INPUT" ]; then
+    ALV_LOCAL_PUBLICATION_DIRECTORY=.
+  elif [ -z "$ALV_LOCAL_PUBLICATION_DIRECTORY" ]; then
+    ALV_LOCAL_PUBLICATION_DIRECTORY=/
+  fi
+
+  ALV_LOCAL_PUBLICATION_DIRECTORY=$(alv_canonical_directory \
+    "$ALV_LOCAL_PUBLICATION_DIRECTORY")
+  if [ "$ALV_LOCAL_PUBLICATION_DIRECTORY" = / ]; then
+    ALV_LOCAL_PUBLICATION_DESTINATION=/$ALV_LOCAL_PUBLICATION_NAME
+  else
+    ALV_LOCAL_PUBLICATION_DESTINATION=$ALV_LOCAL_PUBLICATION_DIRECTORY/$ALV_LOCAL_PUBLICATION_NAME
+  fi
+
+  if [ -e "$ALV_LOCAL_PUBLICATION_DESTINATION" ] || \
+     [ -L "$ALV_LOCAL_PUBLICATION_DESTINATION" ]; then
+    alv_fail "refusing to overwrite: $ALV_LOCAL_PUBLICATION_DESTINATION"
+  fi
+  command -v link >/dev/null 2>&1 || \
+    alv_fail "link is required for exact local publication"
+
+  if ALV_LOCAL_PUBLICATION_STAGE=$(mktemp \
+      "$ALV_LOCAL_PUBLICATION_DESTINATION.partial.XXXXXX"); then
+    :
+  else
+    alv_fail "could not create a private local publication stage"
+  fi
+  [ -f "$ALV_LOCAL_PUBLICATION_STAGE" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+    alv_fail "local publication stage is not a regular file"
+  chmod 600 "$ALV_LOCAL_PUBLICATION_STAGE" || \
+    alv_fail "could not secure the local publication stage"
+  [ -f "$ALV_LOCAL_PUBLICATION_STAGE" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+    alv_fail "local publication stage changed unexpectedly"
+  ALV_LOCAL_PUBLICATION_MODE=$(alv_file_mode \
+    "$ALV_LOCAL_PUBLICATION_STAGE")
+  [ "$ALV_LOCAL_PUBLICATION_MODE" = 600 ] || \
+    alv_fail "local publication stage permissions are not 0600"
+}
+
+alv_local_publication_publish() {
+  ALV_LOCAL_PUBLICATION_EXACT_DESTINATION=$1
+  ALV_LOCAL_PUBLICATION_EXPECTED_HASH=$2
+
+  [ -n "${ALV_LOCAL_PUBLICATION_STAGE:-}" ] || \
+    alv_fail "no local publication stage is active"
+  [ "$ALV_LOCAL_PUBLICATION_EXACT_DESTINATION" = \
+    "$ALV_LOCAL_PUBLICATION_DESTINATION" ] || \
+    alv_fail "local publication destination changed unexpectedly"
+  [ -f "$ALV_LOCAL_PUBLICATION_STAGE" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+    alv_fail "local publication stage changed unexpectedly"
+  ALV_LOCAL_PUBLICATION_MODE=$(alv_file_mode \
+    "$ALV_LOCAL_PUBLICATION_STAGE")
+  [ "$ALV_LOCAL_PUBLICATION_MODE" = 600 ] || \
+    alv_fail "local publication stage permissions are not 0600"
+
+  if link \
+      "$ALV_LOCAL_PUBLICATION_STAGE" \
+      "$ALV_LOCAL_PUBLICATION_DESTINATION"; then
+    :
+  else
+    if [ -e "$ALV_LOCAL_PUBLICATION_DESTINATION" ] || \
+       [ -L "$ALV_LOCAL_PUBLICATION_DESTINATION" ]; then
+      alv_fail "refusing to overwrite a destination that appeared during publication: $ALV_LOCAL_PUBLICATION_DESTINATION"
+    fi
+    alv_fail "cannot publish the exact destination atomically; same-directory hard-link support is required: $ALV_LOCAL_PUBLICATION_DESTINATION"
+  fi
+  [ -f "$ALV_LOCAL_PUBLICATION_DESTINATION" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_DESTINATION" ] || \
+    alv_fail "published destination is not a regular file"
+  if ! unlink "$ALV_LOCAL_PUBLICATION_STAGE"; then
+    alv_fail "could not remove the local publication stage"
+  fi
+  if [ -e "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+     [ -L "$ALV_LOCAL_PUBLICATION_STAGE" ]; then
+    alv_fail "local publication stage remained after publication"
+  fi
+
+  ALV_LOCAL_PUBLICATION_ACTUAL_HASH=$(alv_sha256_file \
+    "$ALV_LOCAL_PUBLICATION_DESTINATION")
+  [ "$ALV_LOCAL_PUBLICATION_ACTUAL_HASH" = \
+    "$ALV_LOCAL_PUBLICATION_EXPECTED_HASH" ] || \
+    alv_fail "published destination does not match the verified bytes"
+  ALV_LOCAL_PUBLICATION_STAGE=
+  ALV_LOCAL_PUBLICATION_DESTINATION=
+}
+
 alv_copy_verified() {
   ALV_COPY_SOURCE=$1
   ALV_COPY_DESTINATION=$2
 
-  [ ! -e "$ALV_COPY_DESTINATION" ] || \
-    alv_fail "refusing to overwrite: $ALV_COPY_DESTINATION"
-  [ ! -L "$ALV_COPY_DESTINATION" ] || \
-    alv_fail "refusing to overwrite symbolic link: $ALV_COPY_DESTINATION"
-
-  ALV_TEMP_DATA=${ALV_COPY_DESTINATION}.partial.$$
-  [ ! -e "$ALV_TEMP_DATA" ] || \
-    alv_fail "temporary path already exists: $ALV_TEMP_DATA"
+  alv_local_publication_prepare "$ALV_COPY_DESTINATION"
+  ALV_COPY_DESTINATION=$ALV_LOCAL_PUBLICATION_DESTINATION
 
   ALV_SOURCE_HASH_BEFORE=$(alv_sha256_file "$ALV_COPY_SOURCE")
-  cp "$ALV_COPY_SOURCE" "$ALV_TEMP_DATA"
-  chmod 600 "$ALV_TEMP_DATA"
-  ALV_COPIED_HASH=$(alv_sha256_file "$ALV_TEMP_DATA")
+  cp "$ALV_COPY_SOURCE" "$ALV_LOCAL_PUBLICATION_STAGE"
+  chmod 600 "$ALV_LOCAL_PUBLICATION_STAGE"
+  ALV_COPIED_HASH=$(alv_sha256_file "$ALV_LOCAL_PUBLICATION_STAGE")
   ALV_SOURCE_HASH_AFTER=$(alv_sha256_file "$ALV_COPY_SOURCE")
 
   [ "$ALV_SOURCE_HASH_BEFORE" = "$ALV_SOURCE_HASH_AFTER" ] || \
     alv_fail "source changed while it was being copied"
   [ "$ALV_SOURCE_HASH_BEFORE" = "$ALV_COPIED_HASH" ] || \
     alv_fail "copied bytes do not match the source"
-  [ ! -e "$ALV_COPY_DESTINATION" ] || \
-    alv_fail "destination appeared while copying: $ALV_COPY_DESTINATION"
-
-  mv "$ALV_TEMP_DATA" "$ALV_COPY_DESTINATION"
-  ALV_TEMP_DATA=
+  alv_local_publication_publish \
+    "$ALV_COPY_DESTINATION" "$ALV_COPIED_HASH"
   # Consumed by the sourced rclone storage implementation.
   # shellcheck disable=SC2034
   ALV_COPY_HASH=$ALV_COPIED_HASH
@@ -258,7 +374,20 @@ alv_resolve_codex_source() {
         ALV_SOURCE_HOME_RAW=$(alv_default_codex_home)
       fi
       ALV_CODEX_SOURCE_HOME=$(alv_canonical_directory "$ALV_SOURCE_HOME_RAW")
-      ALV_CODEX_SOURCE_DIRECTORY=$ALV_CODEX_SOURCE_HOME/archived_sessions
+      if [ "$ALV_CODEX_SOURCE_HOME" = / ]; then
+        ALV_CODEX_SOURCE_EXPECTED_DIRECTORY=/archived_sessions
+      else
+        ALV_CODEX_SOURCE_EXPECTED_DIRECTORY=$ALV_CODEX_SOURCE_HOME/archived_sessions
+      fi
+      [ ! -L "$ALV_CODEX_SOURCE_EXPECTED_DIRECTORY" ] || \
+        alv_fail "Codex archived_sessions path is a symbolic link"
+      [ -d "$ALV_CODEX_SOURCE_EXPECTED_DIRECTORY" ] || \
+        alv_fail "Codex archived_sessions directory does not exist"
+      ALV_CODEX_SOURCE_DIRECTORY=$(alv_canonical_directory \
+        "$ALV_CODEX_SOURCE_EXPECTED_DIRECTORY")
+      [ "$ALV_CODEX_SOURCE_DIRECTORY" = \
+        "$ALV_CODEX_SOURCE_EXPECTED_DIRECTORY" ] || \
+        alv_fail "Codex archived_sessions directory escapes the selected Codex home"
       ALV_CODEX_SOURCE_FILE=$ALV_CODEX_SOURCE_DIRECTORY/$ALV_CODEX_SOURCE_NAME
       alv_require_regular_file "$ALV_CODEX_SOURCE_FILE"
       ;;

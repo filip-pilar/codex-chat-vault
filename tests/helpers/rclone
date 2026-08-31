@@ -2,10 +2,70 @@
 
 set -eu
 
+umask 077
+
 [ -n "${ALV_TEST_REAL_RCLONE:-}" ] || {
   printf 'ALV_TEST_REAL_RCLONE is required\n' >&2
   exit 2
 }
+
+if [ "${ALV_TEST_RCLONE_MODE:-}" = reject-any-command ]; then
+  [ -n "${ALV_TEST_RCLONE_ROOT:-}" ] && \
+    [ "$ALV_TEST_RCLONE_ROOT" != / ] && \
+    [ "${ALV_TEST_RCLONE_ROOT#/}" != "$ALV_TEST_RCLONE_ROOT" ] && \
+    [ -d "$ALV_TEST_RCLONE_ROOT" ] && \
+    [ ! -L "$ALV_TEST_RCLONE_ROOT" ] || {
+    printf 'ALV_TEST_RCLONE_ROOT must be an explicit test directory\n' >&2
+    exit 2
+  }
+  ALV_TEST_RCLONE_CANONICAL_ROOT=$(CDPATH='' cd -P \
+    "$ALV_TEST_RCLONE_ROOT" 2>/dev/null && pwd -P) || {
+    printf 'cannot canonicalize ALV_TEST_RCLONE_ROOT\n' >&2
+    exit 2
+  }
+  [ "$ALV_TEST_RCLONE_ROOT" = "$ALV_TEST_RCLONE_CANONICAL_ROOT" ] || {
+    printf 'ALV_TEST_RCLONE_ROOT must be canonical\n' >&2
+    exit 2
+  }
+  [ -n "${ALV_TEST_RCLONE_MARKER:-}" ] || {
+    printf 'ALV_TEST_RCLONE_MARKER is required\n' >&2
+    exit 2
+  }
+  case "$ALV_TEST_RCLONE_MARKER" in
+    "$ALV_TEST_RCLONE_ROOT"/*) ;;
+    *) printf 'rclone marker escaped the test root\n' >&2; exit 2 ;;
+  esac
+  ALV_TEST_RCLONE_MARKER_DIRECTORY=${ALV_TEST_RCLONE_MARKER%/*}
+  ALV_TEST_RCLONE_MARKER_NAME=${ALV_TEST_RCLONE_MARKER##*/}
+  case "$ALV_TEST_RCLONE_MARKER_NAME" in
+    ''|.|..)
+      printf 'invalid rclone marker path\n' >&2
+      exit 2
+      ;;
+  esac
+  [ -d "$ALV_TEST_RCLONE_MARKER_DIRECTORY" ] && \
+    [ ! -L "$ALV_TEST_RCLONE_MARKER_DIRECTORY" ] || {
+    printf 'rclone marker parent is not a direct directory\n' >&2
+    exit 2
+  }
+  ALV_TEST_RCLONE_MARKER_DIRECTORY=$(CDPATH='' cd -P \
+    "$ALV_TEST_RCLONE_MARKER_DIRECTORY" 2>/dev/null && pwd -P) || {
+    printf 'cannot canonicalize rclone marker parent\n' >&2
+    exit 2
+  }
+  [ "$ALV_TEST_RCLONE_MARKER" = \
+    "$ALV_TEST_RCLONE_MARKER_DIRECTORY/$ALV_TEST_RCLONE_MARKER_NAME" ] || {
+    printf 'rclone marker path must be canonical\n' >&2
+    exit 2
+  }
+  [ ! -e "$ALV_TEST_RCLONE_MARKER" ] && \
+    [ ! -L "$ALV_TEST_RCLONE_MARKER" ] || {
+    printf 'rclone marker already exists\n' >&2
+    exit 2
+  }
+  printf '%s\n' 'rclone-wrapper-ran' > "$ALV_TEST_RCLONE_MARKER"
+  exit 98
+fi
 
 if [ "${1:-}" = lsf ] && \
    [ "${ALV_TEST_RCLONE_MODE:-}" = reject-list ]; then

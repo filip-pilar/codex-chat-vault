@@ -8,7 +8,6 @@ ALV_VAULT_PROBE_DELETE_FLAG=
 ALV_VAULT_TEMP_BASE=
 ALV_VAULT_TEMP_DIRECTORY=
 ALV_VAULT_STTY_ECHO_DISABLED=false
-ALV_VAULT_RECOVERY_TEMP=
 ALV_VAULT_PENDING_PROFILE=
 ALV_VAULT_PENDING_DEFAULT=false
 ALV_VAULT_PRESERVE_CREATED_REMOTES=false
@@ -136,16 +135,6 @@ alv_vault_pending_profile_cleanup() {
 
 alv_vault_setup_cleanup() {
   alv_vault_probe_cleanup
-  if [ -n "${ALV_VAULT_RECOVERY_TEMP:-}" ]; then
-    case "$ALV_VAULT_RECOVERY_TEMP" in
-      *.partial.*)
-        if [ -e "$ALV_VAULT_RECOVERY_TEMP" ]; then
-          unlink "$ALV_VAULT_RECOVERY_TEMP" 2>/dev/null || true
-        fi
-        ;;
-    esac
-    ALV_VAULT_RECOVERY_TEMP=
-  fi
   alv_vault_pending_profile_cleanup
   if [ -n "$ALV_VAULT_CREATED_REMOTES" ] && \
      [ -n "$ALV_VAULT_SETUP_MARKER" ] && \
@@ -720,9 +709,8 @@ alv_vault_export_recovery() {
   fi
   ALV_VAULT_RECOVERY_DIRECTORY=$(alv_canonical_directory "$ALV_VAULT_RECOVERY_DIRECTORY")
   ALV_VAULT_RECOVERY_OUTPUT=$ALV_VAULT_RECOVERY_DIRECTORY/${ALV_VAULT_RECOVERY_OUTPUT##*/}
-  ALV_VAULT_RECOVERY_TEMP=$ALV_VAULT_RECOVERY_OUTPUT.partial.$$
-  [ ! -e "$ALV_VAULT_RECOVERY_TEMP" ] || \
-    alv_fail "temporary recovery export already exists"
+  alv_local_publication_prepare "$ALV_VAULT_RECOVERY_OUTPUT"
+  ALV_VAULT_RECOVERY_OUTPUT=$ALV_LOCAL_PUBLICATION_DESTINATION
 
   command -v jq >/dev/null 2>&1 || \
     alv_fail "vault recovery export requires jq"
@@ -752,6 +740,12 @@ alv_vault_export_recovery() {
       ;;
   esac
 
+  [ -f "$ALV_LOCAL_PUBLICATION_STAGE" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+    alv_fail "recovery publication stage changed unexpectedly"
+  ALV_VAULT_RECOVERY_MODE=$(alv_file_mode "$ALV_LOCAL_PUBLICATION_STAGE")
+  [ "$ALV_VAULT_RECOVERY_MODE" = 600 ] || \
+    alv_fail "recovery publication stage permissions are not 0600"
   {
     printf '# agent-log-vault recovery config\n'
     printf '# vault: %s\n' "$ALV_VAULT_RECOVERY_NAME"
@@ -768,10 +762,23 @@ alv_vault_export_recovery() {
     printf '%s\n' "$ALV_VAULT_RECOVERY_DUMP" | jq -r \
       --arg remote "$ALV_RCLONE_STORAGE_REMOTE" \
       '.[$remote] | to_entries[] | "\(.key) = \(.value | tostring)"'
-  } > "$ALV_VAULT_RECOVERY_TEMP"
-  chmod 600 "$ALV_VAULT_RECOVERY_TEMP"
-  mv "$ALV_VAULT_RECOVERY_TEMP" "$ALV_VAULT_RECOVERY_OUTPUT"
-  ALV_VAULT_RECOVERY_TEMP=
+  } > "$ALV_LOCAL_PUBLICATION_STAGE"
+  chmod 600 "$ALV_LOCAL_PUBLICATION_STAGE" || \
+    alv_fail "could not secure the recovery publication stage"
+  [ -f "$ALV_LOCAL_PUBLICATION_STAGE" ] && \
+    [ ! -L "$ALV_LOCAL_PUBLICATION_STAGE" ] || \
+    alv_fail "recovery publication stage changed unexpectedly"
+  ALV_VAULT_RECOVERY_MODE=$(alv_file_mode "$ALV_LOCAL_PUBLICATION_STAGE")
+  [ "$ALV_VAULT_RECOVERY_MODE" = 600 ] || \
+    alv_fail "recovery publication stage permissions are not 0600"
+  ALV_VAULT_RECOVERY_HASH=$(alv_sha256_file "$ALV_LOCAL_PUBLICATION_STAGE")
+  alv_local_publication_publish \
+    "$ALV_VAULT_RECOVERY_OUTPUT" "$ALV_VAULT_RECOVERY_HASH"
+
+  alv_require_regular_file "$ALV_VAULT_RECOVERY_OUTPUT"
+  ALV_VAULT_RECOVERY_MODE=$(alv_file_mode "$ALV_VAULT_RECOVERY_OUTPUT")
+  [ "$ALV_VAULT_RECOVERY_MODE" = 600 ] || \
+    alv_fail "recovery export permissions are not 0600"
 
   printf 'wrote sensitive recovery config to %s\n' "$ALV_VAULT_RECOVERY_OUTPUT"
   if [ -n "$ALV_RCLONE_STORAGE_ROOT" ]; then
