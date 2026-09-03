@@ -125,7 +125,11 @@ non-default Codex homes.
 - Offload uploads, reads back, SHA-256 verifies, rechecks the source, and only
   then removes the local file.
 - Restore downloads to private temporary storage, verifies, and atomically
-  places the exact bytes in `archived_sessions`.
+  places the exact bytes in `archived_sessions` when the destination filesystem
+  supports same-directory hard links.
+- Atomic no-clobber publication for restore and recovery exports requires
+  same-directory hard-link support. Without it, the operation fails without
+  creating or replacing the destination or removing its source.
 - Different existing files are never overwritten, and failed operations retain
   their source.
 - Restore never removes the cold copy.

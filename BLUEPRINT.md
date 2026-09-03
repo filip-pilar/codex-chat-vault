@@ -44,7 +44,11 @@ never presented as content verification.
 - Offload is copy, encrypted read-back, SHA-256 verification, then local
   removal.
 - Restore is encrypted download to a private temporary file, SHA-256
-  verification, then atomic placement in `archived_sessions`.
+  verification, then atomic placement in `archived_sessions` when the
+  destination filesystem supports same-directory hard links.
+- Atomic no-clobber publication for restore and recovery exports requires
+  same-directory hard-link support. Without it, the operation fails without
+  creating or replacing the destination or removing its source.
 - A different existing file is never overwritten.
 - Failed or interrupted operations leave their source intact.
 - A verified cold copy is never removed by restore or offload.

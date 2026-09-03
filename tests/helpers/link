@@ -1,0 +1,225 @@
+#!/bin/sh
+
+set -eu
+
+umask 077
+
+[ -n "${ALV_TEST_REAL_LINK:-}" ] || {
+  printf 'ALV_TEST_REAL_LINK is required\n' >&2
+  exit 2
+}
+
+case "${ALV_TEST_LINK_MODE:-}" in
+  '') exec "$ALV_TEST_REAL_LINK" "$@" ;;
+  late-regular|late-directory|late-symlink-directory|reject-link|interrupt-after-link) ;;
+  *)
+    printf 'unsupported ALV_TEST_LINK_MODE\n' >&2
+    exit 2
+    ;;
+esac
+
+[ "$#" -eq 2 ] || {
+  printf 'link injection requires exactly two operands\n' >&2
+  exit 2
+}
+[ -n "${ALV_TEST_LINK_ROOT:-}" ] && \
+  [ "$ALV_TEST_LINK_ROOT" != / ] && \
+  [ "${ALV_TEST_LINK_ROOT#/}" != "$ALV_TEST_LINK_ROOT" ] && \
+  [ -d "$ALV_TEST_LINK_ROOT" ] && [ ! -L "$ALV_TEST_LINK_ROOT" ] || {
+  printf 'ALV_TEST_LINK_ROOT must be an explicit test directory\n' >&2
+  exit 2
+}
+ALV_TEST_LINK_CANONICAL_ROOT=$(CDPATH='' cd -P "$ALV_TEST_LINK_ROOT" 2>/dev/null && pwd -P) || {
+  printf 'cannot canonicalize ALV_TEST_LINK_ROOT\n' >&2
+  exit 2
+}
+[ "$ALV_TEST_LINK_ROOT" = "$ALV_TEST_LINK_CANONICAL_ROOT" ] || {
+  printf 'ALV_TEST_LINK_ROOT must be canonical\n' >&2
+  exit 2
+}
+[ -n "${ALV_TEST_LINK_EXPECTED_DESTINATION:-}" ] || {
+  printf 'ALV_TEST_LINK_EXPECTED_DESTINATION is required\n' >&2
+  exit 2
+}
+[ -n "${ALV_TEST_LINK_MARKER:-}" ] || {
+  printf 'ALV_TEST_LINK_MARKER is required\n' >&2
+  exit 2
+}
+
+alv_test_link_canonical_path() {
+  ALV_TEST_LINK_PATH_INPUT=$1
+  ALV_TEST_LINK_PATH_DIRECTORY=${ALV_TEST_LINK_PATH_INPUT%/*}
+  ALV_TEST_LINK_PATH_NAME=${ALV_TEST_LINK_PATH_INPUT##*/}
+  if [ "$ALV_TEST_LINK_PATH_DIRECTORY" = "$ALV_TEST_LINK_PATH_INPUT" ]; then
+    ALV_TEST_LINK_PATH_DIRECTORY=.
+  elif [ -z "$ALV_TEST_LINK_PATH_DIRECTORY" ]; then
+    ALV_TEST_LINK_PATH_DIRECTORY=/
+  fi
+  case "$ALV_TEST_LINK_PATH_NAME" in
+    ''|.|..)
+      printf 'invalid injected link path\n' >&2
+      return 2
+      ;;
+  esac
+  [ -d "$ALV_TEST_LINK_PATH_DIRECTORY" ] && \
+    [ ! -L "$ALV_TEST_LINK_PATH_DIRECTORY" ] || {
+    printf 'injected link parent is not a direct directory\n' >&2
+    return 2
+  }
+  ALV_TEST_LINK_PATH_DIRECTORY=$(CDPATH='' cd -P "$ALV_TEST_LINK_PATH_DIRECTORY" 2>/dev/null && pwd -P) || {
+    printf 'cannot canonicalize injected link parent\n' >&2
+    return 2
+  }
+  printf '%s/%s\n' "$ALV_TEST_LINK_PATH_DIRECTORY" "$ALV_TEST_LINK_PATH_NAME"
+}
+
+alv_test_link_file_mode() {
+  if ALV_TEST_LINK_MODE_VALUE=$(stat -f '%Lp' "$1" 2>/dev/null); then
+    case "$ALV_TEST_LINK_MODE_VALUE" in
+      ''|*[!0-7]*) ;;
+      *) printf '%s\n' "$ALV_TEST_LINK_MODE_VALUE"; return ;;
+    esac
+  fi
+  if ALV_TEST_LINK_MODE_VALUE=$(stat -c '%a' "$1" 2>/dev/null); then
+    case "$ALV_TEST_LINK_MODE_VALUE" in
+      ''|*[!0-7]*) ;;
+      *) printf '%s\n' "$ALV_TEST_LINK_MODE_VALUE"; return ;;
+    esac
+  fi
+  return 2
+}
+
+ALV_TEST_LINK_SOURCE_CANONICAL=$(alv_test_link_canonical_path "$1")
+ALV_TEST_LINK_DESTINATION_CANONICAL=$(alv_test_link_canonical_path "$2")
+ALV_TEST_LINK_EXPECTED_CANONICAL=$(alv_test_link_canonical_path \
+  "$ALV_TEST_LINK_EXPECTED_DESTINATION")
+ALV_TEST_LINK_MARKER_CANONICAL=$(alv_test_link_canonical_path \
+  "$ALV_TEST_LINK_MARKER")
+[ "$1" = "$ALV_TEST_LINK_SOURCE_CANONICAL" ] && \
+  [ "$2" = "$ALV_TEST_LINK_DESTINATION_CANONICAL" ] && \
+  [ "$ALV_TEST_LINK_EXPECTED_DESTINATION" = "$ALV_TEST_LINK_EXPECTED_CANONICAL" ] && \
+  [ "$ALV_TEST_LINK_MARKER" = "$ALV_TEST_LINK_MARKER_CANONICAL" ] || {
+  printf 'link injection paths must be canonical\n' >&2
+  exit 2
+}
+
+case "$1" in
+  "$ALV_TEST_LINK_ROOT"/*) ;;
+  *) printf 'link source escaped the test root\n' >&2; exit 2 ;;
+esac
+case "$2" in
+  "$ALV_TEST_LINK_ROOT"/*) ;;
+  *) printf 'link destination escaped the test root\n' >&2; exit 2 ;;
+esac
+case "$ALV_TEST_LINK_EXPECTED_DESTINATION" in
+  "$ALV_TEST_LINK_ROOT"/*) ;;
+  *) printf 'expected link destination escaped the test root\n' >&2; exit 2 ;;
+esac
+case "$ALV_TEST_LINK_MARKER" in
+  "$ALV_TEST_LINK_ROOT"/*) ;;
+  *) printf 'link marker escaped the test root\n' >&2; exit 2 ;;
+esac
+[ "$2" = "$ALV_TEST_LINK_EXPECTED_DESTINATION" ] || {
+  printf 'link destination did not match the expected test path\n' >&2
+  exit 2
+}
+[ -f "$1" ] && [ ! -L "$1" ] || {
+  printf 'injected link source must be a regular stage\n' >&2
+  exit 2
+}
+ALV_TEST_LINK_SOURCE_DIRECTORY=${1%/*}
+ALV_TEST_LINK_DESTINATION_DIRECTORY=${2%/*}
+[ "$ALV_TEST_LINK_SOURCE_DIRECTORY" = \
+  "$ALV_TEST_LINK_DESTINATION_DIRECTORY" ] || {
+  printf 'injected link stage must share the destination parent\n' >&2
+  exit 2
+}
+case "$1" in
+  "$ALV_TEST_LINK_EXPECTED_DESTINATION".partial.??????) ;;
+  *)
+    printf 'link source was not a six-character random publication stage\n' >&2
+    exit 2
+    ;;
+esac
+ALV_TEST_LINK_SOURCE_MODE=$(alv_test_link_file_mode "$1") || {
+  printf 'could not determine injected link stage permissions\n' >&2
+  exit 2
+}
+[ "$ALV_TEST_LINK_SOURCE_MODE" = 600 ] || {
+  printf 'injected link stage permissions are not 0600\n' >&2
+  exit 2
+}
+[ ! -e "$2" ] && [ ! -L "$2" ] || {
+  printf 'injected link destination already exists\n' >&2
+  exit 2
+}
+[ ! -e "$ALV_TEST_LINK_MARKER" ] && [ ! -L "$ALV_TEST_LINK_MARKER" ] || {
+  printf 'link marker already exists\n' >&2
+  exit 2
+}
+[ "$ALV_TEST_LINK_MARKER" != "$1" ] && \
+  [ "$ALV_TEST_LINK_MARKER" != "$2" ] || {
+  printf 'link marker must be distinct from publication paths\n' >&2
+  exit 2
+}
+
+if [ "$ALV_TEST_LINK_MODE" = late-symlink-directory ]; then
+  [ -n "${ALV_TEST_LINK_SYMLINK_DIRECTORY:-}" ] || {
+    printf 'ALV_TEST_LINK_SYMLINK_DIRECTORY is required\n' >&2
+    exit 2
+  }
+  case "$ALV_TEST_LINK_SYMLINK_DIRECTORY" in
+    "$ALV_TEST_LINK_ROOT"/*) ;;
+    *) printf 'link symlink directory escaped the test root\n' >&2; exit 2 ;;
+  esac
+  ALV_TEST_LINK_SYMLINK_DIRECTORY_CANONICAL=$(alv_test_link_canonical_path \
+    "$ALV_TEST_LINK_SYMLINK_DIRECTORY")
+  [ "$ALV_TEST_LINK_SYMLINK_DIRECTORY" = \
+    "$ALV_TEST_LINK_SYMLINK_DIRECTORY_CANONICAL" ] || {
+    printf 'link symlink directory must be canonical\n' >&2
+    exit 2
+  }
+  [ ! -e "$ALV_TEST_LINK_SYMLINK_DIRECTORY" ] && \
+    [ ! -L "$ALV_TEST_LINK_SYMLINK_DIRECTORY" ] || {
+    printf 'link symlink directory already exists\n' >&2
+    exit 2
+  }
+  [ "$ALV_TEST_LINK_SYMLINK_DIRECTORY" != "$ALV_TEST_LINK_MARKER" ] && \
+    [ "$ALV_TEST_LINK_SYMLINK_DIRECTORY" != "$1" ] && \
+    [ "$ALV_TEST_LINK_SYMLINK_DIRECTORY" != "$2" ] || {
+    printf 'link symlink directory must be a distinct test path\n' >&2
+    exit 2
+  }
+fi
+
+printf '%s\n' 'link-wrapper-ran' > "$ALV_TEST_LINK_MARKER"
+[ -f "$ALV_TEST_LINK_MARKER" ] && [ ! -L "$ALV_TEST_LINK_MARKER" ] || {
+  printf 'could not create a regular link marker\n' >&2
+  exit 2
+}
+
+case "$ALV_TEST_LINK_MODE" in
+  late-regular)
+    printf '%s\n' 'late-regular-target' > "$2"
+    exec "$ALV_TEST_REAL_LINK" "$1" "$2"
+    ;;
+  late-directory)
+    mkdir "$2"
+    exec "$ALV_TEST_REAL_LINK" "$1" "$2"
+    ;;
+  late-symlink-directory)
+    mkdir "$ALV_TEST_LINK_SYMLINK_DIRECTORY"
+    ln -s "$ALV_TEST_LINK_SYMLINK_DIRECTORY" "$2"
+    exec "$ALV_TEST_REAL_LINK" "$1" "$2"
+    ;;
+  reject-link)
+    printf '%s\n' 'test wrapper rejected the exact link' >&2
+    exit 98
+    ;;
+  interrupt-after-link)
+    "$ALV_TEST_REAL_LINK" "$1" "$2"
+    kill -TERM "$PPID"
+    printf '%s\n' 'link-wrapper-signal-sent' > "$ALV_TEST_LINK_MARKER"
+    exit 0
+    ;;
+esac
