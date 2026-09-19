@@ -1,28 +1,21 @@
-# agent-log-vault
+# Codex Chat Vault
 
-`agent-log-vault` (`alv`) safely moves Codex archived chats between
-`archived_sessions` and an encrypted cold vault.
+Move archived Codex chats into encrypted local or cloud storage, then restore
+individual chats when you need them. The CLI is `alv`.
 
 ```text
-Codex archived_sessions <-> encrypted cold vault
+Codex archived_sessions  ──offload──>  encrypted vault (rclone crypt)
+                        <─restore──  local folder, drive, or cloud storage
 ```
 
-Cold storage always uses rclone `crypt`, whether its backing storage is a
-folder, mounted drive, Cloudflare R2, Backblaze B2, Dropbox, OneDrive Personal,
-or another rclone target.
+Offload removes the local archive only after uploading and reading back the
+exact bytes for SHA-256 verification. Restore keeps the encrypted copy.
+Active Codex sessions are never moved.
 
-## Use with an agent
+Previously `agent-log-vault`. The repo name changed; the `alv` launcher,
+`agent-log-vault` executable, and existing configuration paths stay the same.
 
-Repository-aware agents should read `AGENTS.md` before acting. Claude Code uses
-the `CLAUDE.md` bridge to load the same instructions. A useful starting request
-is: “Read `AGENTS.md`, inspect my setup read-only, explain the exact proposed
-actions, and ask before changing real Codex or cloud state.”
-
-An agent may safely begin with `./alv --help`, `./alv vault list`, and
-`./alv list local`. A general request to use the repository should not be
-treated as permission to offload or restore histories.
-
-## Setup
+## Requirements
 
 There is no build or installation step. Run `./alv` from the cloned repository
 and keep the launcher, main executable, and `lib/agent-log-vault/` together.
@@ -32,48 +25,37 @@ also requires `openssl`. `jq` enables enriched listings, stats, planning,
 inspection, and recovery export. When available, `sqlite3` adds Codex's stored
 title, archive time, and Git branch to inspection output.
 
-Create a local encrypted vault in an existing directory:
+## Archive and restore a chat
+
+Start with an encrypted vault in a local folder. There is no build step:
 
 ```sh
+git clone https://github.com/filip-pilar/codex-chat-vault.git
+cd codex-chat-vault
 mkdir -p /absolute/path/to/cold-vault
 ./alv vault add local cold --path /absolute/path/to/cold-vault
+./alv list local
 ```
 
-Or configure a cloud vault. R2 expects bucket-scoped Object Read & Write
-credentials. B2 expects a bucket-scoped Read and Write application key for the
-existing bucket. Dropbox and OneDrive hand browser authorization to rclone.
+Choose an archived `rollout-*.jsonl` from that list. **Quit Codex Desktop and
+Codex CLI before offloading or restoring**, then replace the example filename
+below with the one you chose:
 
 ```sh
-./alv vault add r2 cold
-./alv vault add b2 cold
-./alv vault add dropbox cold
-./alv vault add onedrive cold
+# Move the archived chat into the encrypted vault after read-back verification.
+./alv offload rollout-EXAMPLE.jsonl --vault cold
+
+# Check the encrypted copy, then restore the chat to archived_sessions.
+./alv verify rollout-EXAMPLE.jsonl --vault cold
+./alv restore rollout-EXAMPLE.jsonl --vault cold
 ```
 
-Run R2 and B2 setup without secret flags when possible and answer the private
-prompts yourself. `./alv --help` documents every non-interactive option, but
-command-line secrets can be exposed through shell history or agent logs.
+The chat is local again and its encrypted copy remains in the vault. To
+preview a larger cleanup without moving anything, use
+`./alv plan offload --created-before 2026-01-01 --vault cold`.
 
-The OneDrive helper accepts Personal accounts only. Configure OneDrive
-Business, SharePoint, or Google Drive directly in rclone, then use the advanced
-command below.
-
-Advanced users can wrap any existing rclone target. If the target is already a
-secure `crypt` remote, it is used directly.
-
-```sh
-./alv vault add rclone cold --remote existing-remote:optional/path
-```
-
-Setup creates the encryption configuration in rclone, performs a disposable
-upload/read-back check, and saves the named vault only if validation succeeds.
-The first vault is the default. Use `./alv vault list`,
-`./alv vault use <name>`, or `--vault <name>` when more than one is configured.
-
-ALV profiles default to `${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-vault` and
-contain no credentials. `ALV_CONFIG_HOME` overrides that location. Codex data
-defaults to `${CODEX_HOME:-$HOME/.codex}`; rclone owns provider credentials and
-encryption secrets.
+See [safety and recovery](#safety-and-recovery) before moving valuable archives;
+keep a secure recovery export of the vault's encryption configuration.
 
 ## Everyday use
 
@@ -118,6 +100,44 @@ removing anything local.
 `--codex-home <directory>` are supported for disposable environments and
 non-default Codex homes.
 
+## Cloud vaults and configuration
+
+Configure one cloud vault using the matching command below. R2 expects
+bucket-scoped Object Read & Write credentials. B2 expects a bucket-scoped Read and Write application key for the
+existing bucket. Dropbox and OneDrive hand browser authorization to rclone.
+
+```sh
+./alv vault add r2 cold
+./alv vault add b2 cold
+./alv vault add dropbox cold
+./alv vault add onedrive cold
+```
+
+Run R2 and B2 setup without secret flags when possible and answer the private
+prompts yourself. `./alv --help` documents every non-interactive option, but
+command-line secrets can be exposed through shell history or agent logs.
+
+The OneDrive helper accepts Personal accounts only. Configure OneDrive
+Business, SharePoint, or Google Drive directly in rclone, then use the advanced
+command below.
+
+Advanced users can wrap any existing rclone target. If the target is already a
+secure `crypt` remote, it is used directly.
+
+```sh
+./alv vault add rclone cold --remote existing-remote:optional/path
+```
+
+Setup creates the encryption configuration in rclone, performs a disposable
+upload/read-back check, and saves the named vault only if validation succeeds.
+The first vault is the default. Use `./alv vault list`,
+`./alv vault use <name>`, or `--vault <name>` when more than one is configured.
+
+ALV profiles default to `${XDG_CONFIG_HOME:-$HOME/.config}/agent-log-vault` and
+contain no credentials. `ALV_CONFIG_HOME` overrides that location. Codex data
+defaults to `${CODEX_HOME:-$HOME/.codex}`; rclone owns provider credentials and
+encryption secrets.
+
 ## Safety and recovery
 
 - Only `rollout-*.jsonl` files directly inside `archived_sessions` can be
@@ -152,6 +172,17 @@ vault on another machine.
 Use that file as `RCLONE_CONFIG` on the recovery machine, verify the printed
 rclone target, then pass the printed encrypted target to
 `alv vault add rclone` to recreate the named profile.
+
+## Use with an agent
+
+Repository-aware agents should read `AGENTS.md` before acting. Claude Code uses
+the `CLAUDE.md` bridge to load the same instructions. A useful starting request
+is: “Read `AGENTS.md`, inspect my setup read-only, explain the exact proposed
+actions, and ask before changing real Codex or cloud state.”
+
+An agent may safely begin with `./alv --help`, `./alv vault list`, and
+`./alv list local`. A general request to use the repository should not be
+treated as permission to offload or restore histories.
 
 ## Validation
 
