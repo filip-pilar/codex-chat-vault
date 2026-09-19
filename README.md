@@ -200,3 +200,7 @@ Separately approved macOS live tests have passed for local storage, Cloudflare
 R2, Backblaze B2, and Dropbox, including encrypted offload, read-back
 verification, restoration, and exact-byte comparison. OneDrive Personal has
 only isolated mock coverage so far.
+
+## License
+
+[MIT](LICENSE) © 2026 Filip Pilar.
