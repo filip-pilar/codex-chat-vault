@@ -1,4 +1,4 @@
-# agent-log-vault agent instructions
+# Codex Chat Vault agent instructions
 
 ## Purpose
 

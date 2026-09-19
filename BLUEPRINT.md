@@ -1,6 +1,6 @@
-# agent-log-vault blueprint
+# Codex Chat Vault blueprint
 
-`agent-log-vault` is a safe shuttle between Codex archived chats and an
+Codex Chat Vault (`alv`) is a safe shuttle between Codex archived chats and an
 encrypted cold vault.
 
 ```text
